@@ -37,13 +37,26 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--episodes", type=int, default=100)
     parser.add_argument("--frozen", action="store_true", default=False)
     parser.add_argument("--checkpoint", help="Path to PPO checkpoint", default=None)
+    parser.add_argument(
+        "--headless",
+        dest="headless",
+        action="store_true",
+        default=True,
+        help="Run Chromium headless during evaluation (default)",
+    )
+    parser.add_argument(
+        "--no-headless",
+        dest="headless",
+        action="store_false",
+        help="Disable headless mode to watch evaluation",
+    )
     parser.add_argument("--memory", default="memory.jsonl")
     parser.add_argument("--env", default=None, help="Override environment id")
     return parser.parse_args()
 
 
-def make_env(env_id: str) -> BrowserGymEnvWrapper:
-    return BrowserGymEnvWrapper(env_id=env_id)
+def make_env(env_id: str, headless: bool) -> BrowserGymEnvWrapper:
+    return BrowserGymEnvWrapper(env_id=env_id, headless=headless)
 
 
 def main() -> None:
@@ -61,7 +74,7 @@ def main() -> None:
             continue
         logger.info("Evaluating %s on %s", args.agent, task_id)
         env_id = task_id
-        env_factory = lambda: make_env(env_id)
+        env_factory = lambda: make_env(env_id, args.headless)
 
         if args.agent == "baseline_rl":
             rl_agent = PureRLAgent(env_fn=env_factory)

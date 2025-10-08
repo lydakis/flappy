@@ -93,7 +93,9 @@ Training & evaluation workflow
      --save-every 50000 \
      --log-interval 5 \
      --log-file logs/hybrid_click.csv \
-     --tensorboard logs/tb/hybrid
+     --tensorboard logs/tb/hybrid \
+     --action-trace-file logs/hybrid_click_trace.jsonl \
+     --no-headless
    ```
 
    Use `--resume-from checkpoints/hybrid_click.pt` to continue training from an existing checkpoint.
@@ -105,6 +107,14 @@ Training & evaluation workflow
    * `success` – 1 if the task succeeded, 0 otherwise
    * `coach_interventions` – coach calls per episode (drops as the policy internalises subgoals)
 
+   Launch TensorBoard in another terminal to inspect the curves live:
+
+   ```bash
+   tensorboard --logdir logs/tb/hybrid
+   ```
+
+   If you supply `--action-trace-file`, each episode’s low-level actions (clicks, types, etc.) are appended as JSON lines so you can audit what the agent attempted.
+
 2. **Evaluate** any agent (including the trained hybrid) with frozen weights:
 
    ```bash
@@ -113,7 +123,8 @@ Training & evaluation workflow
      --env browsergym/miniwob.click-checkboxes \
      --episodes 100 \
      --checkpoint checkpoints/hybrid_click.pt \
-     --frozen
+     --frozen \
+     --no-headless
    ```
 
 3. **Compare baselines** by swapping `--agent` for `coach_random` or `baseline_rl`.

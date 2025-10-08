@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import json
 import logging
 import os
 import pathlib
@@ -50,7 +51,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--env", default="browsergym/miniwob.click-checkboxes")
     parser.add_argument("--steps", type=int, default=200_000)
     parser.add_argument("--intrinsic", choices=["rnd", "none"], default="rnd")
-    parser.add_argument("--headless", action="store_true", default=True)
+    parser.add_argument(
+        "--headless",
+        dest="headless",
+        action="store_true",
+        default=True,
+        help="Run Chromium in headless mode (default)",
+    )
+    parser.add_argument(
+        "--no-headless",
+        dest="headless",
+        action="store_false",
+        help="Disable headless mode to watch the browser window",
+    )
     parser.add_argument("--memory", default="memory.jsonl")
     parser.add_argument("--resume-from", default=None, help="Path to a learner checkpoint")
     parser.add_argument("--save-path", default=None, help="Where to store learner checkpoints")
@@ -72,6 +85,11 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Directory for TensorBoard summaries (requires torch.utils.tensorboard)",
     )
+    parser.add_argument(
+        "--action-trace-file",
+        default=None,
+        help="Optional JSONL file capturing per-episode action traces",
+    )
     return parser.parse_args()
 
 
@@ -82,7 +100,6 @@ def make_env(env_id: str, headless: bool) -> BrowserGymEnvWrapper:
 def main() -> None:
     args = parse_args()
     env_id = args.env
-    headless = args.headless
 
     if args.agent == "hybrid":
         llm_client = OpenAIPlannerClient()
@@ -97,7 +114,7 @@ def main() -> None:
                 "Resumed learner from %s (total_steps=%d)", args.resume_from, learner.total_steps
             )
         agent = HybridAgent(
-            env=make_env(env_id, headless),
+            env=make_env(env_id, args.headless),
             coach=coach,
             learner=learner,
             memory=memory,
@@ -139,6 +156,11 @@ def main() -> None:
             else:
                 ensure_parent_dir(os.path.join(args.tensorboard, "dummy"))
                 tb_writer = SummaryWriter(log_dir=args.tensorboard)
+
+        trace_file_handle = None
+        if args.action_trace_file:
+            ensure_parent_dir(args.action_trace_file)
+            trace_file_handle = open(args.action_trace_file, "a", encoding="utf-8")
         while steps_collected < args.steps:
             stats = agent.run_episode(env_id)
             steps_collected += int(stats.get("steps", 0))
@@ -200,6 +222,18 @@ def main() -> None:
                 tb_writer.add_scalar(
                     "episode/steps", stats.get("steps", 0), global_step
                 )
+
+            if trace_file_handle is not None and "trace" in stats:
+                trace_entry = {
+                    "episode": episodes,
+                    "learner_steps": learner.total_steps,
+                    "success": stats.get("success", 0.0),
+                    "reward": stats.get("reward", 0.0),
+                    "intrinsic_reward": stats.get("intrinsic_reward", 0.0),
+                    "actions": stats.get("trace", []),
+                }
+                trace_file_handle.write(json.dumps(trace_entry) + "\n")
+                trace_file_handle.flush()
         logger.info("Hybrid exploration collected %d steps", steps_collected)
         if args.save_path:
             ensure_parent_dir(args.save_path)
@@ -214,12 +248,14 @@ def main() -> None:
             csv_file_handle.close()
         if tb_writer is not None:
             tb_writer.close()
+        if trace_file_handle is not None:
+            trace_file_handle.close()
     elif args.agent == "coach_random":
         llm_client = OpenAIPlannerClient()
         coach = Coach(llm_client)
         memory = load_memory(args.memory)
         agent = CoachRandomAgent(
-            env=make_env(env_id, headless),
+            env=make_env(env_id, args.headless),
             coach=coach,
             memory=memory,
         )
@@ -228,7 +264,7 @@ def main() -> None:
             agent.run_episode(env_id)
         logger.info("Coach-random exploration rolled %d episodes.", episodes)
     else:
-        agent = PureRLAgent(env_fn=lambda: make_env(env_id, headless))
+        agent = PureRLAgent(env_fn=lambda: make_env(env_id, args.headless))
         agent.learn(total_timesteps=args.steps)
         logger.info("Pure RL exploration complete.")
 

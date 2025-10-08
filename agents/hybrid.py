@@ -160,6 +160,7 @@ class HybridAgent:
             "steps": step + 1,
             "coach_interventions": float(self.interventions),
             "intrinsic_reward": intrinsic_total,
+            "trace": list(episode_trace),
         }
 
     def _select_action(
