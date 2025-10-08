@@ -11,7 +11,7 @@ llm:
   max_retries: 3
   reflexion_enabled: true
 rl:
-  backend: sb3
+  backend: custom
   algo: ppo_rnd
   intrinsic_weight: 1.0
   extrinsic_weight: 1.0

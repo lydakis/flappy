@@ -16,7 +16,7 @@ from llm.coach import Coach, CoachDirective
 from llm.memory import JsonlMemoryStore, MemoryEntry, retrieve_top_k
 from rl.context import SubgoalEncoder
 from rl.features import DomTextHasher
-from rl.rnd_ppo_agent import PPORNDLearner
+from rl.rnd_ppo_agent import PPORNDLearner, SampleOutput
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +46,9 @@ class HybridAgent:
         self.max_steps = max_steps
         self.reflexion_enabled = reflexion_enabled
         self.reflexion_read_only = reflexion_read_only
-        self.subgoal_encoder = SubgoalEncoder()
-        self.state_encoder = (
-            learner.feature_extractor if learner is not None else DomTextHasher(dim=2048)
-        )
+        self.subgoal_encoder = SubgoalEncoder(dim=learner.config.subgoal_dim if learner else 256)
+        feature_dim = learner.config.feature_dim if learner else 2048
+        self.state_encoder = DomTextHasher(dim=feature_dim)
         self.recent_actions: Deque[str] = deque(maxlen=20)
         self.current_subgoal = ""
         self.current_subgoal_vec = np.zeros(self.subgoal_encoder.dim, dtype=np.float32)
@@ -89,10 +88,12 @@ class HybridAgent:
             self._refresh_mask(inventory_strings)
 
             state_vec = self._state_vector(observation)
-            action_idx = self._select_action(
+            subgoal_vec = self.current_subgoal_vec.copy()
+            mask_vec = self.current_mask.copy() if self.current_mask is not None else None
+            action_idx, sample = self._select_action(
                 state_vec,
-                self.current_subgoal_vec,
-                self.current_mask,
+                subgoal_vec,
+                mask_vec,
                 len(action_candidates),
             )
             planner_action = action_candidates[action_idx]
@@ -102,7 +103,7 @@ class HybridAgent:
 
             obs, reward, terminated, truncated, info = self.env.step(planner_action)
             observation = self.env.encode_observation(obs)
-            entropy = info.get("policy_entropy", 0.0)
+            entropy = sample.entropy if sample is not None else info.get("policy_entropy", 0.0)
             self._update_entropy(entropy)
 
             if self._should_request_guidance(step, info):
@@ -111,6 +112,22 @@ class HybridAgent:
                     dom_summary=observation["dom_text"],
                     inventory=inventory_strings,
                     reflections=reflections,
+                )
+
+            next_state_vec = self._state_vector(observation)
+            next_subgoal_vec = self.current_subgoal_vec.copy()
+
+            if self.learner is not None and sample is not None:
+                intrinsic_reward = self.learner.compute_intrinsic(next_state_vec)
+                self.learner.observe_transition(
+                    state=state_vec,
+                    subgoal=subgoal_vec,
+                    sample=sample,
+                    reward=reward,
+                    intrinsic=intrinsic_reward,
+                    done=bool(terminated or truncated),
+                    next_state=next_state_vec,
+                    next_subgoal=next_subgoal_vec,
                 )
 
             if terminated or truncated:
@@ -148,26 +165,25 @@ class HybridAgent:
         subgoal_vec: np.ndarray,
         mask: Optional[np.ndarray],
         action_count: int,
-    ) -> int:
+    ) -> tuple[int, Optional[SampleOutput]]:
         """Choose an action index, respecting mask constraints."""
         valid_indices = self._valid_indices(mask, action_count)
         if not valid_indices:
             valid_indices = list(range(action_count))
         if self.learner is None:
-            return random.choice(valid_indices)
+            return random.choice(valid_indices), None
         try:
-            action_idx = int(
-                self.learner.sample_action_with_context(
-                    state_vec, subgoal_vec, mask, action_count
-                )
+            sample = self.learner.sample_action_with_context(
+                state_vec, subgoal_vec, mask, action_count
             )
+            action_idx = int(sample.action)
         except Exception as exc:  # pragma: no cover - learner optional
             logger.warning("Learner sample failed, falling back to random: %s", exc)
             self.learner = None
-            action_idx = random.choice(valid_indices)
+            return random.choice(valid_indices), None
         if action_idx not in valid_indices:
             action_idx = random.choice(valid_indices)
-        return action_idx
+        return action_idx, sample
 
     def _should_request_guidance(self, step: int, info: Dict[str, float]) -> bool:
         if step > 0 and step % self.planner_interval == 0:

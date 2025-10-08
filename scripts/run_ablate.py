@@ -40,7 +40,7 @@ def main() -> None:
     rnd_config = RNDConfig(
         intrinsic_weight=0.0 if args.disable_rnd else 1.0,
     )
-    learner = PPORNDLearner(env_fn=lambda: make_env(args.env), rnd_config=rnd_config)
+    learner = PPORNDLearner(rnd_config=rnd_config)
     agent = HybridAgent(
         env=make_env(args.env),
         coach=coach,
@@ -49,8 +49,11 @@ def main() -> None:
         planner_interval=args.planner_interval,
         reflexion_enabled=not args.disable_reflexion,
     )
-    learner.learn(total_timesteps=args.steps)
-    logger.info("Ablation run completed.")
+    steps_collected = 0
+    while steps_collected < args.steps:
+        stats = agent.run_episode(args.env)
+        steps_collected += int(stats.get("steps", 0))
+    logger.info("Ablation run collected %d steps.", steps_collected)
 
 
 if __name__ == "__main__":

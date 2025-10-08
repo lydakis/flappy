@@ -46,8 +46,7 @@ def main() -> None:
         coach = Coach(llm_client)
         memory = load_memory(args.memory)
         learner = PPORNDLearner(
-            env_fn=lambda: make_env(env_id, headless),
-            rnd_config=RNDConfig(intrinsic_weight=1.0 if args.intrinsic == "rnd" else 0.0),
+            rnd_config=RNDConfig(intrinsic_weight=1.0 if args.intrinsic == "rnd" else 0.0)
         )
         agent = HybridAgent(
             env=make_env(env_id, headless),
@@ -55,8 +54,11 @@ def main() -> None:
             learner=learner,
             memory=memory,
         )
-        learner.learn(total_timesteps=args.steps)
-        logger.info("Hybrid exploration complete.")
+        steps_collected = 0
+        while steps_collected < args.steps:
+            stats = agent.run_episode(env_id)
+            steps_collected += int(stats.get("steps", 0))
+        logger.info("Hybrid exploration collected %d steps", steps_collected)
     elif args.agent == "coach_random":
         llm_client = OpenAIPlannerClient()
         coach = Coach(llm_client)

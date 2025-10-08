@@ -66,7 +66,7 @@ def main() -> None:
                 reflexion_read_only=args.frozen,
             )
         else:
-            learner = PPORNDLearner(env_fn=env_factory)
+            learner = PPORNDLearner()
             if args.checkpoint:
                 learner.load(args.checkpoint)
             agent = HybridAgent(
