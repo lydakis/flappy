@@ -27,7 +27,9 @@ Quick start
 -----------
 
 1. Install system dependencies (Python 3.11, poetry or pip, Chrome/Chromium).
-2. Copy `.env.example` to `.env` and set `OPENAI_API_KEY`.
+2. Copy `.env.example` to `.env` and set required keys, including `OPENAI_API_KEY` and
+   a reachable `MINIWOB_URL` (see BrowserGym docs for self-hosting). The CLI scripts
+   load this file automatically via `python-dotenv`.
 3. Install Python dependencies:
 
    ```bash
@@ -37,8 +39,8 @@ Quick start
 4. Launch MiniWoB++ via BrowserGym (see `scripts/bootstrap_browsergym.sh` once added) and run dry evals:
 
    ```bash
-   python scripts/run_eval.py --agent coach_random --env miniwob/click-checkboxes
-   python scripts/run_eval.py --agent hybrid --env miniwob/click-checkboxes
+   python scripts/run_eval.py --agent coach_random --env browsergym/miniwob.click-checkboxes
+   python scripts/run_eval.py --agent hybrid --env browsergym/miniwob.click-checkboxes
    ```
 
 5. Monitor TensorBoard logs in `runs/`.

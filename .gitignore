@@ -1,0 +1,19 @@
+# Python venvs
+.venv/
+
+# Local environment secrets
+.env
+
+# Episodic memory and cache files
+memory.jsonl
+memory.sqlite
+memory/
+
+# Python cache
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Checkpoint directories (add specific files later if desired)
+checkpoints/
+

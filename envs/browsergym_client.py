@@ -11,6 +11,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import logging
+import os
 import time
 from typing import Any, Dict, Optional, Tuple
 
@@ -21,10 +22,11 @@ except ImportError:  # pragma: no cover - handled during runtime
 
 try:
     import browsergym
-    from browsergym.core.action import BrowserAction
+    import browsergym.miniwob  # noqa: F401
 except ImportError:  # pragma: no cover - handled during runtime
     browsergym = None
-    BrowserAction = Any  # type: ignore[misc,assignment]
+
+BrowserAction = Any  # type: ignore[misc,assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,10 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
                 "Please install the project dependencies."
             )
 
+        miniwob_url = os.environ.get("MINIWOB_URL")
+        if miniwob_url and not miniwob_url.endswith("/"):
+            os.environ["MINIWOB_URL"] = miniwob_url + "/"
+
         self.env_id = env_id
         self.headless = headless
         self.max_episode_steps = max_episode_steps
@@ -76,7 +82,6 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
         logger.info("Creating BrowserGym environment %s", self.env_id)
         kwargs: Dict[str, Any] = {
             "headless": self.headless,
-            "observation_mode": self.observation_mode,
         }
         if self.max_episode_steps is not None:
             kwargs["max_episode_steps"] = self.max_episode_steps

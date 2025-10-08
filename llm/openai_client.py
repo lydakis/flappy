@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
@@ -15,6 +16,11 @@ except ImportError:  # pragma: no cover - optional dependency
     OpenAI = None  # type: ignore[assignment]
     Response = Any  # type: ignore[misc,assignment]
 
+try:  # pragma: no cover - optional dependency
+    from dotenv import load_dotenv
+except ImportError:
+    load_dotenv = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -22,6 +28,9 @@ DEFAULT_MODEL = "gpt-5-mini"
 DEFAULT_MAX_RETRIES = 3
 TOKENS_PER_DOLLAR_INPUT = 1_000_000  # placeholder; update with official pricing
 TOKENS_PER_DOLLAR_OUTPUT = 1_000_000
+
+if load_dotenv is not None:  # pragma: no cover - environment bootstrap
+    load_dotenv()
 
 
 @dataclass
@@ -62,10 +71,20 @@ class OpenAIPlannerClient:
         *,
         max_retries: int = DEFAULT_MAX_RETRIES,
         request_timeout: int = 30,
+        api_key: Optional[str] = None,
     ) -> None:
         if OpenAI is None:  # pragma: no cover - runtime guard
             raise RuntimeError("openai package is not installed. `pip install openai`.")
-        self.client = OpenAI(timeout=request_timeout)
+        client_kwargs: Dict[str, Any] = {"timeout": request_timeout}
+        if api_key is None:
+            api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            client_kwargs["api_key"] = api_key
+        else:
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set. Provide it in the environment or pass api_key."
+            )
+        self.client = OpenAI(**client_kwargs)
         self.model = model
         self.max_retries = max_retries
         self.stats = LLMStats()
@@ -80,7 +99,7 @@ class OpenAIPlannerClient:
         """Call Responses API with retries."""
         payload = {
             "model": self.model,
-            "input": {"messages": list(messages)},
+            "input": _format_messages(messages),
         }
         if tools:
             payload["tools"] = tools
@@ -149,12 +168,35 @@ class OpenAIPlannerClient:
         if not output:
             raise ValueError("LLM response missing output.")
         text_chunks: List[str] = []
-        for block in output[0].content:  # type: ignore[index]
-            if block.type == "output_text":
-                text_chunks.append(getattr(block, "text", ""))
+        for item in output:  # type: ignore[assignment]
+            for block in getattr(item, "content", []) or []:
+                if block.type == "output_text":
+                    text_chunks.append(getattr(block, "text", ""))
         if not text_chunks:
             raise ValueError("No text content in LLM response.")
         return "\n".join(chunk.strip() for chunk in text_chunks if chunk)
+
+
+def _format_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    formatted: List[Dict[str, Any]] = []
+    for message in messages:
+        role = message.get("role")
+        content = message.get("content", "")
+        if isinstance(content, str):
+            formatted.append(
+                {
+                    "role": role,
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": content,
+                        }
+                    ],
+                }
+            )
+        else:
+            formatted.append(message)
+    return formatted
 
     def asdict(self) -> Dict[str, Any]:
         stats = self.stats

@@ -28,7 +28,7 @@ rl:
     normalization: running_mean_var
   checkpoint_interval: 50000
 env:
-  id: miniwob/click-checkboxes
+  id: browsergym/miniwob.click-checkboxes
   num_envs: 1
   max_episode_steps: 200
   headless: true

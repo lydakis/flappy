@@ -5,6 +5,16 @@ from __future__ import annotations
 
 import argparse
 import logging
+import pathlib
+import sys
+
+from dotenv import load_dotenv
+
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+load_dotenv(ROOT / ".env")
 
 from agents.hybrid import HybridAgent
 from envs.browsergym_client import BrowserGymEnvWrapper
@@ -19,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="FLAPPY ablation harness")
-    parser.add_argument("--env", default="miniwob/click-checkboxes")
+    parser.add_argument("--env", default="browsergym/miniwob.click-checkboxes")
     parser.add_argument("--steps", type=int, default=100_000)
     parser.add_argument("--disable-rnd", action="store_true")
     parser.add_argument("--disable-reflexion", action="store_true")

@@ -1,19 +1,19 @@
 tasks:
-  - id: miniwob/click-checkboxes
+  - id: browsergym/miniwob.click-checkboxes
     max_episode_steps: 200
     eval_episodes: 100
-  - id: miniwob/click-tab-2
+  - id: browsergym/miniwob.click-tab-2
     max_episode_steps: 200
     eval_episodes: 100
-  - id: miniwob/enter-text
+  - id: browsergym/miniwob.enter-text
     max_episode_steps: 200
     eval_episodes: 100
-  - id: miniwob/email-inbox
+  - id: browsergym/miniwob.email-inbox
     max_episode_steps: 200
     eval_episodes: 100
-  - id: miniwob/search-engine
+  - id: browsergym/miniwob.search-engine
     max_episode_steps: 200
     eval_episodes: 100
-  - id: miniwob/use-autocomplete
+  - id: browsergym/miniwob.use-autocomplete
     max_episode_steps: 200
     eval_episodes: 100

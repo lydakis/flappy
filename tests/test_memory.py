@@ -6,7 +6,7 @@ from llm.memory import JsonlMemoryStore, MemoryEntry, retrieve_top_k
 def test_memory_roundtrip(tmp_path: Path):
     store = JsonlMemoryStore(tmp_path / "memory.jsonl")
     entry = MemoryEntry(
-        task_id="miniwob/click-checkboxes",
+        task_id="browsergym/miniwob.click-checkboxes",
         episode_id="ep1",
         success=True,
         notes="Click the checkbox faster next time",
