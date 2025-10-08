@@ -1,0 +1,11 @@
+browsergym
+gymnasium>=0.29.0
+numpy
+openai>=1.45.0
+pydantic
+pyyaml
+stable-baselines3>=2.3.0
+torch
+typer
+pytest
+tenacity

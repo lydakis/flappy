@@ -1,0 +1,53 @@
+seed: 7
+logging:
+  root_dir: runs
+  tensorboard: true
+  wandb: false
+llm:
+  model: gpt-5-mini
+  temperature: 0.2
+  max_tokens: 1024
+  request_timeout: 30
+  max_retries: 3
+  reflexion_enabled: true
+rl:
+  backend: sb3
+  algo: ppo_rnd
+  intrinsic_weight: 1.0
+  extrinsic_weight: 1.0
+  rollout_steps: 2048
+  batch_size: 256
+  learning_rate: 3.0e-4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  rnd:
+    embedding_dim: 1024
+    predictor_lr: 1.0e-4
+    target_lr: 0.0
+    normalization: running_mean_var
+  checkpoint_interval: 50000
+env:
+  id: miniwob/click-checkboxes
+  num_envs: 1
+  max_episode_steps: 200
+  headless: true
+  browsergym:
+    navigation_timeout: 5.0
+    observation_mode: dom_text
+  selectors:
+    max_attempts: 3
+evaluation:
+  episodes: 100
+  frozen: true
+  online_updates: false
+  success_at_k: [1, 5, 10]
+hybrid:
+  planner_interval: 10
+  reflexion_read_only: false
+  intrinsic_alpha: 0.2
+  stuck_entropy_threshold: 2.0
+coach:
+  mask_decay: 0.9
+  max_mask_idle_steps: 20
+  reflection_enabled: true
