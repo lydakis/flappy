@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 import uuid
+from pathlib import Path
 from collections import deque
 from typing import Deque, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -59,6 +61,7 @@ class HybridAgent:
         self.entropy_window: Deque[float] = deque(maxlen=stuck_window)
         self.stuck_entropy_threshold = stuck_entropy_threshold
         self.max_actions = learner.max_actions if learner else 20
+        self._debug_obs_dumped = False
 
     def run_episode(self, task_id: str) -> Dict[str, float]:
         obs, info = self.env.reset(return_info=True)
@@ -68,7 +71,7 @@ class HybridAgent:
         episode_trace: List[str] = []
         intrinsic_total = 0.0
 
-        action_candidates, inventory_strings = self._action_catalog(observation["dom_text"])
+        action_candidates, inventory_strings = self._action_catalog(obs)
         if not action_candidates:
             action_candidates = self._default_action_catalog()
             inventory_strings = self._inventory_strings(action_candidates)
@@ -81,7 +84,7 @@ class HybridAgent:
         )
 
         for step in range(self.max_steps):
-            action_candidates, inventory_strings = self._action_catalog(observation["dom_text"])
+            action_candidates, inventory_strings = self._action_catalog(obs)
             if not action_candidates:
                 action_candidates = self._default_action_catalog()
                 inventory_strings = self._inventory_strings(action_candidates)
@@ -305,16 +308,112 @@ class HybridAgent:
     def _state_vector(self, observation: Dict[str, str]) -> np.ndarray:
         return self.state_encoder.encode({"dom_text": observation.get("dom_text", "")})
 
-    def _action_catalog(self, dom_text: str) -> Tuple[List[PlannerAction], List[str]]:
-        selector_budget = max(1, self.max_actions // 2)
-        selectors = extract_interactive_selectors(dom_text, max_candidates=selector_budget)
+    def _action_catalog(self, raw_obs: Dict[str, Any]) -> Tuple[List[PlannerAction], List[str]]:
         actions: List[PlannerAction] = []
-        for selector in selectors:
-            actions.append(make_planner_action("click", selector=selector))
-            actions.append(make_planner_action("type", selector=selector, text="test"))
-        actions.extend(self._default_navigation_actions())
-        if len(actions) > self.max_actions:
-            actions = actions[: self.max_actions]
+        action_keys: set[Tuple] = set()
+
+        def add_action(action: PlannerAction) -> None:
+            key = (
+                action.name,
+                action.selector,
+                action.text,
+                action.key,
+                action.direction,
+                action.wait_ms,
+            )
+            if key in action_keys or len(actions) >= self.max_actions:
+                return
+            action_keys.add(key)
+            actions.append(action)
+
+        if not self._debug_obs_dumped:
+            try:
+                ensure_path = Path("logs")
+                ensure_path.mkdir(parents=True, exist_ok=True)
+                with (ensure_path / "last_raw_obs.json").open("w", encoding="utf-8") as f:
+                    json.dump(raw_obs, f, default=str)
+            except Exception as exc:  # pragma: no cover - debug helper
+                logger.debug("Failed to dump raw observation: %s", exc)
+            self._debug_obs_dumped = True
+
+        extra = raw_obs.get("extra_element_properties")
+        if isinstance(extra, dict):
+            for element in extra.values():
+                if not isinstance(element, dict):
+                    continue
+                selector = (
+                    element.get("selector")
+                    or element.get("css_selector")
+                    or element.get("unique_selector")
+                )
+                if not selector:
+                    continue
+                tag = (element.get("tag") or element.get("nodeName") or "").lower()
+                input_type = (element.get("type") or element.get("inputType") or "").lower()
+                role = (element.get("role") or "").lower()
+                clickable = tag in {"button", "a", "option", "label"} or input_type in {
+                    "button",
+                    "submit",
+                    "checkbox",
+                    "radio",
+                } or role in {"button", "link", "checkbox", "option"}
+                text_input = tag in {"textarea"} or (
+                    tag == "input"
+                    and input_type
+                    in {"text", "email", "search", "number", "password", "url", "tel"}
+                )
+                if clickable:
+                    add_action(make_planner_action("click", selector=selector))
+                if text_input:
+                    add_action(
+                        make_planner_action(
+                            "type",
+                            selector=selector,
+                            text=element.get("value", ""),
+                        )
+                    )
+                if len(actions) >= self.max_actions:
+                    break
+
+        dom_obj = raw_obs.get("dom_object")
+        if len(actions) < self.max_actions and isinstance(dom_obj, dict):
+            strings = dom_obj.get("strings", [])
+            for i, token in enumerate(strings):
+                if len(actions) >= self.max_actions:
+                    break
+                if token == "INPUT" and i + 2 < len(strings):
+                    input_type = strings[i + 1]
+                    element_id = strings[i + 2]
+                    if input_type == "checkbox" and element_id:
+                        add_action(make_planner_action("click", selector=f"#{element_id}"))
+                if token == "BUTTON" and i + 1 < len(strings):
+                    element_id = strings[i + 1]
+                    if element_id:
+                        add_action(make_planner_action("click", selector=f"#{element_id}"))
+
+        if len(actions) < self.max_actions:
+            if dom_obj:
+                serialized = json.dumps(dom_obj)
+            else:
+                dom_text = raw_obs.get("dom_text") or raw_obs.get("text") or ""
+                if isinstance(dom_text, bytes):
+                    try:
+                        dom_text = dom_text.decode("utf-8")
+                    except UnicodeDecodeError:
+                        dom_text = dom_text.decode("utf-8", errors="ignore")
+                elif not isinstance(dom_text, str):
+                    dom_text = str(dom_text)
+                serialized = dom_text
+            for selector in extract_interactive_selectors(
+                serialized, max_candidates=self.max_actions
+            ):
+                add_action(make_planner_action("click", selector=selector))
+                if len(actions) >= self.max_actions:
+                    break
+
+        for nav_action in self._default_navigation_actions():
+            add_action(nav_action)
+
         inventory = self._inventory_strings(actions)
         return actions, inventory
 
