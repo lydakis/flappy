@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import List, Optional
 
 import numpy as np
@@ -331,18 +331,33 @@ class PPORNDLearner:
                 "rnd": self.rnd_module.state_dict(),
                 "optimizer": self.optimizer.state_dict(),
                 "rnd_opt": self.rnd_optimizer.state_dict(),
+                "total_steps": self.total_steps,
+                "config": asdict(self.config),
+                "rnd_config": asdict(self.rnd_config),
             },
             path,
         )
 
     def load(self, path: str) -> None:
-        checkpoint = torch.load(path)
+        checkpoint = torch.load(path, map_location="cpu")
         self.policy.load_state_dict(checkpoint["policy"])
         self.value_net.load_state_dict(checkpoint["value"])
         self.rnd_module.load_state_dict(checkpoint["rnd"])
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.rnd_optimizer.load_state_dict(checkpoint["rnd_opt"])
+        self.total_steps = int(checkpoint.get("total_steps", 0))
+        self.rollout.clear()
+        saved_config = checkpoint.get("config")
+        if saved_config and saved_config != asdict(self.config):
+            logger.warning("LearnerConfig mismatch when loading checkpoint. Using current config.")
+        saved_rnd = checkpoint.get("rnd_config")
+        if saved_rnd and saved_rnd != asdict(self.rnd_config):
+            logger.warning("RNDConfig mismatch when loading checkpoint. Using current config.")
 
     @property
     def max_actions(self) -> int:
         return self.config.max_actions
+
+    @property
+    def step_count(self) -> int:
+        return self.total_steps

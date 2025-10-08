@@ -36,7 +36,15 @@ Quick start
    pip install -r requirements.txt
    ```
 
-4. Launch MiniWoB++ via BrowserGym (see `scripts/bootstrap_browsergym.sh` once added) and run dry evals:
+4. Launch MiniWoB++ via the Farama miniwob-plusplus assets. Clone and serve the HTML root:
+
+   ```bash
+   git clone git@github.com:Farama-Foundation/miniwob-plusplus.git
+   cd miniwob-plusplus/miniwob/html
+   python3 -m http.server 8890
+   ```
+
+   Set `MINIWOB_URL=http://127.0.0.1:8890/miniwob/` in `.env` (note the `/miniwob/` suffix) and run dry evals:
 
    ```bash
    python scripts/run_eval.py --agent coach_random --env browsergym/miniwob.click-checkboxes
@@ -71,3 +79,41 @@ License
 -------
 
 See `LICENSE`.
+Training & evaluation workflow
+------------------------------
+
+1. **Train / explore** with the hybrid agent. The example below collects 200k steps, logs progress, and writes checkpoints/metrics:
+
+   ```bash
+   python scripts/run_explore.py \
+     --agent hybrid \
+     --env browsergym/miniwob.click-checkboxes \
+     --steps 200000 \
+     --save-path checkpoints/hybrid_click.pt \
+     --save-every 50000 \
+     --log-interval 5 \
+     --log-file logs/hybrid_click.csv \
+     --tensorboard logs/tb/hybrid
+   ```
+
+   Use `--resume-from checkpoints/hybrid_click.pt` to continue training from an existing checkpoint.
+
+   Episode metrics are emitted to stdout, the CSV (if provided), and TensorBoard summaries:
+
+   * `reward` – extrinsic task reward per episode (should rise toward success)
+   * `intrinsic_reward` – RND curiosity bonus (decays as the policy covers the DOM)
+   * `success` – 1 if the task succeeded, 0 otherwise
+   * `coach_interventions` – coach calls per episode (drops as the policy internalises subgoals)
+
+2. **Evaluate** any agent (including the trained hybrid) with frozen weights:
+
+   ```bash
+   python scripts/run_eval.py \
+     --agent hybrid \
+     --env browsergym/miniwob.click-checkboxes \
+     --episodes 100 \
+     --checkpoint checkpoints/hybrid_click.pt \
+     --frozen
+   ```
+
+3. **Compare baselines** by swapping `--agent` for `coach_random` or `baseline_rl`.

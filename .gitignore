@@ -16,4 +16,4 @@ __pycache__/
 
 # Checkpoint directories (add specific files later if desired)
 checkpoints/
-
+logs/

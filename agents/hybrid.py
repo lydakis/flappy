@@ -66,6 +66,7 @@ class HybridAgent:
         reflections = self._retrieve_reflections(task_id)
         episode_id = str(uuid.uuid4())
         episode_trace: List[str] = []
+        intrinsic_total = 0.0
 
         action_candidates, inventory_strings = self._action_catalog(observation["dom_text"])
         if not action_candidates:
@@ -119,6 +120,7 @@ class HybridAgent:
 
             if self.learner is not None and sample is not None:
                 intrinsic_reward = self.learner.compute_intrinsic(next_state_vec)
+                intrinsic_total += intrinsic_reward
                 self.learner.observe_transition(
                     state=state_vec,
                     subgoal=subgoal_vec,
@@ -157,6 +159,7 @@ class HybridAgent:
             "reward": reward_total,
             "steps": step + 1,
             "coach_interventions": float(self.interventions),
+            "intrinsic_reward": intrinsic_total,
         }
 
     def _select_action(
