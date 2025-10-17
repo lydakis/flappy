@@ -82,6 +82,7 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
         logger.info("Creating BrowserGym environment %s", self.env_id)
         kwargs: Dict[str, Any] = {
             "headless": self.headless,
+            "action_mapping": None,
         }
         if self.max_episode_steps is not None:
             kwargs["max_episode_steps"] = self.max_episode_steps
@@ -114,6 +115,11 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
         obs, reward, terminated, truncated, info = self.env.step(env_action)  # type: ignore[arg-type]
         latency = time.perf_counter() - start
         info.setdefault("flappy/latency_sec", latency)
+        task_info = info.get("task_info", {}) or {}
+        episode_reward = float(task_info.get("RAW_REWARD_GLOBAL", reward))
+        success = bool(task_info.get("DONE_GLOBAL") and episode_reward > 0.0)
+        info.setdefault("episode_reward", episode_reward)
+        info.setdefault("success", success)
         self._step_count += 1
         self._last_observation = obs
         return obs, float(reward), bool(terminated), bool(truncated), info
@@ -126,8 +132,19 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
         dom_text = obs.get("dom_text") or obs.get("text")
         if isinstance(dom_text, bytes):
             dom_text = dom_text.decode("utf-8")
+        goal = obs.get("goal") or obs.get("instruction") or ""
+        if not dom_text:
+            dom_object = obs.get("dom_object")
+            if dom_object:
+                try:
+                    dom_text = json.dumps(dom_object)
+                except TypeError:
+                    dom_text = str(dom_object)
+        combined = dom_text or ""
+        if goal:
+            combined = f"Goal: {goal}\n{combined}"
         return {
-            "dom_text": dom_text or "",
+            "dom_text": combined,
             "url": obs.get("url", ""),
             "timestamp": time.time(),
         }
@@ -175,33 +192,58 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
         }
 
     def _planner_action_to_browser_action(self, action: PlannerAction) -> BrowserAction:
-        """Map planner-friendly actions into BrowserGym actions."""
+        """Translate planner actions into executable BrowserGym python snippets."""
+        timeout_ms = int((self.navigation_timeout or DEFAULT_ACTION_TIMEOUT) * 1000)
         name = action.name
-        payload: Dict[str, Any]
         if name == "click":
-            payload = {"action_type": "click", "selector": action.selector}
-        elif name == "type":
-            payload = {
-                "action_type": "type",
-                "selector": action.selector,
-                "text": action.text or "",
-            }
-        elif name == "press":
-            payload = {"action_type": "press", "key": action.key}
-        elif name == "scroll":
-            payload = {"action_type": "scroll", "direction": action.direction}
-        elif name == "wait":
-            payload = {"action_type": "wait", "milliseconds": action.wait_ms or 0}
-        elif name == "back":
-            payload = {"action_type": "history", "direction": "back"}
-        elif name == "save_note":
-            payload = {"action_type": "noop", "note": action.text}
-        else:  # pragma: no cover - defensive
-            raise ValueError(f"Unsupported planner action: {name}")
-
-        payload.setdefault("timeout", self.navigation_timeout)
-        logger.debug("Planner action %s mapped to %s", name, json.dumps(payload))
-        return payload  # type: ignore[return-value]
+            if not action.selector:
+                raise ValueError("click action requires a selector")
+            selector = json.dumps(action.selector)
+            return (
+                f"elem = page.wait_for_selector({selector}, state='visible', timeout={timeout_ms})\n"
+                "if elem is None:\n"
+                f"    raise ValueError('Selector not found: {action.selector}')\n"
+                "elem.click(timeout=5000, force=True)\n"
+            )
+        if name == "type":
+            if not action.selector:
+                raise ValueError("type action requires a selector")
+            selector = json.dumps(action.selector)
+            text = json.dumps(action.text or "")
+            return (
+                f"elem = page.wait_for_selector({selector}, state='visible', timeout={timeout_ms})\n"
+                "if elem is None:\n"
+                f"    raise ValueError('Selector not found: {action.selector}')\n"
+                "elem.click(timeout=5000)\n"
+                f"elem.fill({text}, timeout=5000)\n"
+            )
+        if name == "press":
+            if action.selector:
+                selector = json.dumps(action.selector)
+                focus_snippet = (
+                    f"elem = page.wait_for_selector({selector}, timeout={timeout_ms})\n"
+                    "if elem is None:\n"
+                    f"    raise ValueError('Selector not found: {action.selector}')\n"
+                    "elem.focus()\n"
+                )
+            else:
+                focus_snippet = ""
+            key = json.dumps(action.key or "")
+            if not action.key:
+                raise ValueError("press action requires a key")
+            return focus_snippet + f"page.keyboard.press({key}, timeout=5000)\n"
+        if name == "scroll":
+            direction = (action.direction or "down").lower()
+            delta = 400 if direction == "down" else -400
+            return f"page.mouse.wheel(0, {delta})\n"
+        if name == "wait":
+            wait_ms = int(action.wait_ms or 0)
+            return f"page.wait_for_timeout({max(wait_ms, 0)})\n"
+        if name == "back":
+            return "page.go_back(wait_until='load')\n"
+        if name == "save_note":
+            return "pass\n"
+        raise ValueError(f"Unsupported planner action: {name}")
 
     def last_observation(self) -> Optional[Dict[str, Any]]:
         """Return the last raw observation."""

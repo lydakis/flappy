@@ -55,6 +55,8 @@ class SampleOutput:
     value: float
     mask: np.ndarray
     entropy: float
+    policy_mask: Optional[np.ndarray] = None
+    coach_mask: Optional[np.ndarray] = None
 
 
 @dataclass
@@ -70,6 +72,8 @@ class Transition:
     done: bool
     next_state: np.ndarray
     next_subgoal: np.ndarray
+    policy_mask: Optional[np.ndarray] = None
+    coach_mask: Optional[np.ndarray] = None
 
 
 class RNDModule(nn.Module):
@@ -129,6 +133,7 @@ class PPORNDLearner:
                 subgoal_dim=self.config.subgoal_dim,
                 hidden_dim=self.config.hidden_dim,
                 action_dim=self.config.max_actions,
+                use_mask_head=True,
             )
         )
         self.value_net = ValueNetwork(self.config)
@@ -152,13 +157,21 @@ class PPORNDLearner:
         subgoal_vec: np.ndarray,
         mask: Optional[np.ndarray],
         action_count: int,
+        *,
+        policy_mask: Optional[np.ndarray] = None,
+        coach_mask: Optional[np.ndarray] = None,
         deterministic: bool = False,
     ) -> SampleOutput:
-        mask_full = np.ones(self.config.max_actions, dtype=np.float32)
-        if action_count < self.config.max_actions:
-            mask_full[action_count:] = 0.0
+        effective_policy = policy_mask
+        if effective_policy is None:
+            effective_policy = self.policy.predict_mask(state_vec, subgoal_vec)
+
+        mask_full = np.zeros(self.config.max_actions, dtype=np.float32)
+        mask_full[:action_count] = 1.0
         if mask is not None:
-            mask_full[: len(mask)] *= mask.astype(np.float32)
+            mask_full[: len(mask)] = mask.astype(np.float32)
+        elif effective_policy is not None:
+            mask_full[: len(effective_policy)] = effective_policy.astype(np.float32)
         if mask_full[:action_count].sum() == 0.0:
             mask_full[:action_count] = 1.0
 
@@ -174,13 +187,41 @@ class PPORNDLearner:
         value = float(self.value_net(state, subgoal).item())
         entropy = float(dist.entropy().mean().item())
 
+        trimmed_policy = (
+            np.asarray(effective_policy, dtype=np.float32)[:action_count]
+            if effective_policy is not None
+            else None
+        )
+        trimmed_coach = (
+            np.asarray(coach_mask, dtype=np.float32)[:action_count]
+            if coach_mask is not None
+            else None
+        )
+
         return SampleOutput(
             action=action,
             log_prob=log_prob,
             value=value,
             mask=mask_full,
             entropy=entropy,
+            policy_mask=trimmed_policy,
+            coach_mask=trimmed_coach,
         )
+
+    def predict_action_mask(
+        self,
+        *,
+        state_vec: np.ndarray,
+        subgoal_vec: np.ndarray,
+        action_count: int,
+    ) -> Optional[np.ndarray]:
+        predicted = self.policy.predict_mask(state_vec, subgoal_vec)
+        if predicted is None:
+            return None
+        arr = np.asarray(predicted, dtype=np.float32).reshape(-1)
+        if len(arr) >= action_count:
+            return arr[:action_count]
+        return arr
 
     def compute_intrinsic(self, next_state: np.ndarray) -> float:
         state_tensor = torch.from_numpy(next_state.astype(np.float32)).unsqueeze(0)
@@ -228,6 +269,12 @@ class PPORNDLearner:
             done=done,
             next_state=next_state.astype(np.float32),
             next_subgoal=next_subgoal.astype(np.float32),
+            policy_mask=(
+                sample.policy_mask.astype(np.float32) if sample.policy_mask is not None else None
+            ),
+            coach_mask=(
+                sample.coach_mask.astype(np.float32) if sample.coach_mask is not None else None
+            ),
         )
         self.rollout.append(transition)
         self.total_steps += 1

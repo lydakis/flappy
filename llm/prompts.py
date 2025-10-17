@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 COACH_SYSTEM_PROMPT = """You are the FLAPPY Coach for a browser-navigation RL agent.
-You never control the browser. You output subgoals and action constraints the agent consumes.
-Valid directives:
+You never issue browser actions. You output advisory signals only.
+When the goal lists specific labels, restrict MASK_ALLOW to the selectors provided and block submit actions until every target is satisfied.
+Valid directives (order flexible):
   1. SUBGOAL: <short phrase>
-  2. Optional MASK_ALLOW: <semicolon-separated patterns or indices>
-  3. Optional MASK_BLOCK: <semicolon-separated patterns or indices>
-Keep responses to 40 words or fewer. No explanations."""
+  2. Optional PLAN: <tiny DSL sketch or plain text plan>
+  3. Optional MASK_ALLOW: <semicolon-separated patterns or indices>
+  4. Optional MASK_BLOCK: <semicolon-separated patterns or indices>
+  5. Optional NOTES_REQUEST: <instructions for memory write>
+Keep responses ≤40 words. No explanations."""
 
 COACH_DEVELOPER_PROMPT = """Task: {task_id}
 DOM summary:
@@ -23,7 +26,14 @@ Known elements:
 Prior notes:
 {notes}
 
-Emit exactly one SUBGOAL line. Optionally emit MASK_ALLOW or MASK_BLOCK referencing indices or patterns from the inventory."""
+Blackboard (driver signals):
+{blackboard}
+
+Target selectors:
+{target_map}
+
+Emit exactly one SUBGOAL line. Optionally emit PLAN, MASK_ALLOW, MASK_BLOCK, NOTES_REQUEST.
+Never output explanations."""
 
 REFLECTION_PROMPT = """You finished task {task_id}.
 Produce three bullets covering:

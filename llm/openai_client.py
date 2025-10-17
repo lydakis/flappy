@@ -162,6 +162,16 @@ class OpenAIPlannerClient:
                     return {"name": "done", "arguments": {}}
         raise ValueError("No tool call found in LLM response.")
 
+    def stats_snapshot(self) -> Dict[str, Any]:
+        stats = self.stats
+        return {
+            "total_requests": stats.total_requests,
+            "total_input_tokens": stats.total_input_tokens,
+            "total_output_tokens": stats.total_output_tokens,
+            "avg_latency_sec": stats.avg_latency,
+            "estimated_cost_usd": stats.estimated_cost_usd(),
+        }
+
     @staticmethod
     def extract_text(response: Response) -> str:
         output = response.output
@@ -197,13 +207,3 @@ def _format_messages(messages: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]
         else:
             formatted.append(message)
     return formatted
-
-    def asdict(self) -> Dict[str, Any]:
-        stats = self.stats
-        return {
-            "total_requests": stats.total_requests,
-            "total_input_tokens": stats.total_input_tokens,
-            "total_output_tokens": stats.total_output_tokens,
-            "avg_latency_sec": stats.avg_latency,
-            "estimated_cost_usd": stats.estimated_cost_usd(),
-        }
