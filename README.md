@@ -128,3 +128,17 @@ Training & evaluation workflow
    ```
 
 3. **Compare baselines** by swapping `--agent` for `coach_random` or `baseline_rl`.
+
+4. **Generate day-dreaming ideas** offline and surface them during runs (opt-in):
+
+   ```bash
+   python scripts/run_daydream.py \
+     --memory memory.jsonl \
+     --notes notes.jsonl \
+     --ideas ideas.jsonl \
+     --pairs 200 \
+     --max-accept 25
+   ```
+
+   Accepted hypotheses are appended to `ideas.jsonl`. Pass `--ddl-inject` and `--idea-store ideas.jsonl`
+   to `scripts/run_explore.py` or `scripts/run_eval.py` to let the coach see the latest ideas.

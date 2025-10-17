@@ -22,9 +22,13 @@ from agents.hybrid import HybridAgent
 from envs.browsergym_client import BrowserGymEnvWrapper
 from eval.harness import EvalConfig, evaluate_agent, load_task_list
 from llm.coach import Coach
+from llm.ideas import IdeaStore
 from llm.memory import load_memory
 from llm.openai_client import OpenAIPlannerClient
 from rl.rnd_ppo_agent import PPORNDLearner
+from flappy.extract import DocumentExtractor
+from flappy.memory import NoteStore
+from flappy.rag import SimpleRAG
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -52,6 +56,15 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--memory", default="memory.jsonl")
     parser.add_argument("--env", default=None, help="Override environment id")
+    parser.add_argument("--note-store", default="notes.jsonl")
+    parser.add_argument("--idea-store", default="ideas.jsonl")
+    parser.add_argument(
+        "--ddl-inject",
+        action="store_true",
+        help="Inject day-dreaming ideas alongside reflections",
+    )
+    parser.add_argument("--ddl-top-k", type=int, default=3)
+    parser.add_argument("--qa-question", default=None, help="Optional question for RAG answer")
     return parser.parse_args()
 
 
@@ -68,6 +81,10 @@ def main() -> None:
     llm_client = OpenAIPlannerClient()
     coach = Coach(llm_client)
     memory = load_memory(args.memory)
+    note_store = NoteStore(pathlib.Path(args.note_store)) if args.note_store else None
+    rag = SimpleRAG() if note_store else None
+    extractor = DocumentExtractor() if note_store else None
+    idea_store = IdeaStore(pathlib.Path(args.idea_store)) if args.idea_store else None
 
     for task_id, task in tasks.items():
         if args.env and task_id != args.env:
@@ -87,6 +104,12 @@ def main() -> None:
                 coach=coach,
                 memory=memory,
                 reflexion_read_only=args.frozen,
+                note_store=note_store,
+                rag=rag,
+                extractor=extractor,
+                idea_store=idea_store,
+                ddl_inject=args.ddl_inject,
+                ddl_top_k=args.ddl_top_k,
             )
         else:
             learner = PPORNDLearner()
@@ -98,9 +121,31 @@ def main() -> None:
                 learner=learner,
                 memory=memory,
                 reflexion_read_only=args.frozen,
+                note_store=note_store,
+                rag=rag,
+                extractor=extractor,
+                idea_store=idea_store,
+                ddl_inject=args.ddl_inject,
+                ddl_top_k=args.ddl_top_k,
             )
         results = evaluate_agent(agent, env_factory, {"id": env_id}, eval_cfg)
         logger.info("Results for %s: %s", task_id, results)
+        if hasattr(agent, "macro_registry"):
+            stats = agent.macro_registry.stats()
+            logger.info(
+                "Macro registry size=%d latest=%s",
+                len(stats),
+                getattr(agent, "_current_macro_name", None),
+            )
+        if args.qa_question and hasattr(agent, "answer_question"):
+            answer = agent.answer_question(args.qa_question)
+            if answer is not None:
+                logger.info(
+                    "QA answer: %s | citations=%s | confidence=%.2f",
+                    answer.text,
+                    answer.citations,
+                    getattr(answer, "confidence", 0.0),
+                )
 
 
 if __name__ == "__main__":

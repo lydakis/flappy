@@ -51,3 +51,16 @@ coach:
   mask_decay: 0.9
   max_mask_idle_steps: 20
   reflection_enabled: true
+ddl:
+  enable: false
+  inject: false
+  pairs: 500
+  k: 2
+  thresholds:
+    novelty: 7.0
+    coherence: 6.0
+    usefulness: 6.0
+  time_budget_sec: 900
+  token_budget: 200000
+  max_accept: 50
+  sleep_sec: 0.0

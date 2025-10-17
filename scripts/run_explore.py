@@ -24,9 +24,13 @@ from agents.coach_baseline import CoachRandomAgent
 from agents.hybrid import HybridAgent
 from envs.browsergym_client import BrowserGymEnvWrapper
 from llm.coach import Coach
+from llm.ideas import IdeaStore
 from llm.memory import load_memory
 from llm.openai_client import OpenAIPlannerClient
 from rl.rnd_ppo_agent import PPORNDLearner, RNDConfig
+from flappy.extract import DocumentExtractor
+from flappy.memory import NoteStore
+from flappy.rag import SimpleRAG
 
 try:  # pragma: no cover - optional dependency
     from torch.utils.tensorboard import SummaryWriter  # type: ignore[import]
@@ -90,6 +94,29 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional JSONL file capturing per-episode action traces",
     )
+    parser.add_argument(
+        "--note-store",
+        default="notes.jsonl",
+        help="Path for storing typed notes captured during runs",
+    )
+    parser.add_argument("--idea-store", default="ideas.jsonl", help="Path for storing DDL ideas")
+    parser.add_argument(
+        "--ddl-inject",
+        action="store_true",
+        help="Inject accepted day-dreaming ideas into coach context",
+    )
+    parser.add_argument(
+        "--ddl-top-k",
+        type=int,
+        default=3,
+        help="Maximum number of ideas to inject per request",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=200,
+        help="Maximum environment steps per episode",
+    )
     return parser.parse_args()
 
 
@@ -100,6 +127,10 @@ def make_env(env_id: str, headless: bool) -> BrowserGymEnvWrapper:
 def main() -> None:
     args = parse_args()
     env_id = args.env
+    note_store = NoteStore(pathlib.Path(args.note_store)) if args.note_store else None
+    idea_store = IdeaStore(pathlib.Path(args.idea_store)) if args.idea_store else None
+    rag = SimpleRAG() if note_store else None
+    extractor = DocumentExtractor() if note_store else None
 
     if args.agent == "hybrid":
         llm_client = OpenAIPlannerClient()
@@ -118,6 +149,13 @@ def main() -> None:
             coach=coach,
             learner=learner,
             memory=memory,
+            note_store=note_store,
+            rag=rag,
+            extractor=extractor,
+            max_steps=args.max_steps,
+            idea_store=idea_store,
+            ddl_inject=args.ddl_inject,
+            ddl_top_k=args.ddl_top_k,
         )
         next_save_step = None
         if args.save_path and args.save_every > 0:
@@ -143,6 +181,14 @@ def main() -> None:
                         "intrinsic_reward",
                         "success",
                         "coach_interventions",
+                        "targets_total",
+                        "targets_checked",
+                        "targets_completed",
+                        "submit_guardrail_steps",
+                        "mask_iou",
+                        "notes_written",
+                        "macro_registry_size",
+                        "macro_last",
                     ]
                 )
 
@@ -167,7 +213,7 @@ def main() -> None:
             episodes += 1
             if learner is not None and args.log_interval > 0 and episodes % args.log_interval == 0:
                 logger.info(
-                    "episode=%d | ep_steps=%d | reward=%.2f | intrinsic=%.2f | success=%.0f | coach_calls=%.0f | learner_steps=%d",
+                    "episode=%d | ep_steps=%d | reward=%.2f | intrinsic=%.2f | success=%.0f | coach_calls=%.0f | learner_steps=%d | targets=%d/%d | guardrail=%.0f | mask_iou=%s | notes=%d | macros=%d (%s)",
                     episodes,
                     stats.get("steps", 0),
                     stats.get("reward", 0.0),
@@ -175,6 +221,17 @@ def main() -> None:
                     stats.get("success", 0.0),
                     stats.get("coach_interventions", 0.0),
                     learner.total_steps,
+                    stats.get("targets_checked", 0),
+                    stats.get("targets_total", 0),
+                    stats.get("submit_guardrail_steps", 0.0),
+                    (
+                        f"{stats.get('mask_iou', 0.0):.2f}"
+                        if stats.get("mask_iou") is not None
+                        else "na"
+                    ),
+                    stats.get("notes_written", 0),
+                    stats.get("macro_registry_size", 0),
+                    stats.get("macro_last", "none"),
                 )
             if (
                 args.save_path
@@ -201,6 +258,14 @@ def main() -> None:
                         stats.get("intrinsic_reward", 0.0),
                         stats.get("success", 0.0),
                         stats.get("coach_interventions", 0.0),
+                        stats.get("targets_total", 0),
+                        stats.get("targets_checked", 0),
+                        stats.get("targets_completed", 0.0),
+                        stats.get("submit_guardrail_steps", 0.0),
+                        stats.get("mask_iou", 0.0) if stats.get("mask_iou") is not None else 0.0,
+                        stats.get("notes_written", 0),
+                        stats.get("macro_registry_size", 0),
+                        stats.get("macro_last", ""),
                     ]
                 )
                 csv_file_handle.flush()
@@ -222,6 +287,31 @@ def main() -> None:
                 tb_writer.add_scalar(
                     "episode/steps", stats.get("steps", 0), global_step
                 )
+                tb_writer.add_scalar(
+                    "episode/targets_total", stats.get("targets_total", 0), global_step
+                )
+                tb_writer.add_scalar(
+                    "episode/targets_checked",
+                    stats.get("targets_checked", 0),
+                    global_step,
+                )
+                tb_writer.add_scalar(
+                    "episode/submit_guardrail_steps",
+                    stats.get("submit_guardrail_steps", 0.0),
+                    global_step,
+                )
+                if stats.get("mask_iou") is not None:
+                    tb_writer.add_scalar("episode/mask_iou", stats.get("mask_iou"), global_step)
+                tb_writer.add_scalar(
+                    "episode/notes_written",
+                    stats.get("notes_written", 0),
+                    global_step,
+                )
+                tb_writer.add_scalar(
+                    "episode/macro_registry_size",
+                    stats.get("macro_registry_size", 0),
+                    global_step,
+                )
 
             if trace_file_handle is not None and "trace" in stats:
                 trace_entry = {
@@ -230,6 +320,8 @@ def main() -> None:
                     "success": stats.get("success", 0.0),
                     "reward": stats.get("reward", 0.0),
                     "intrinsic_reward": stats.get("intrinsic_reward", 0.0),
+                    "notes_written": stats.get("notes_written", 0),
+                    "macro_last": stats.get("macro_last", ""),
                     "actions": stats.get("trace", []),
                 }
                 trace_file_handle.write(json.dumps(trace_entry) + "\n")
@@ -258,6 +350,14 @@ def main() -> None:
             env=make_env(env_id, args.headless),
             coach=coach,
             memory=memory,
+            planner_interval=args.max_steps // 20 if args.max_steps else 10,
+            max_steps=args.max_steps,
+            note_store=note_store,
+            rag=rag,
+            extractor=extractor,
+            idea_store=idea_store,
+            ddl_inject=args.ddl_inject,
+            ddl_top_k=args.ddl_top_k,
         )
         episodes = max(1, args.steps // 1000)
         for _ in range(episodes):
