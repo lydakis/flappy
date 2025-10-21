@@ -57,13 +57,25 @@ class PlanVerifier:
         return []
 
     def _find_missing_selectors(self, node: DSLNode, selectors: Sequence[str]) -> set[str]:
+        normalized_selectors = {
+            selector.lower() for selector in selectors if isinstance(selector, str)
+        }
+
         missing: set[str] = set()
-        if node.verb in {DSLVerb.CLICK, DSLVerb.TYPE} and node.args:
-            selector = node.args[0]
-            if selector and selectors and selector not in selectors:
-                missing.add(selector)
-        for child in node.children:
-            missing.update(self._find_missing_selectors(child, selectors))
+
+        def _visit(current: DSLNode) -> None:
+            if current.verb in {DSLVerb.CLICK, DSLVerb.TYPE} and current.args:
+                selector = current.args[0]
+                if isinstance(selector, str) and selector:
+                    if selector.lower() not in normalized_selectors:
+                        missing.add(selector)
+                elif selector:
+                    # Non-string selectors cannot be matched against the context.
+                    missing.add(str(selector))
+            for child in current.children:
+                _visit(child)
+
+        _visit(node)
         return missing
 
 

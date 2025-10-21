@@ -47,8 +47,14 @@ def test_plan_synthesiser_identity():
 
 def test_verifier_stub():
     verifier = verify.PlanVerifier()
+    leaf = dsl.make_leaf(dsl.DSLVerb.CLICK, "#submit")
+
+    missing = verifier.verify(leaf, trace=[], context={"selectors": []})
+    assert not missing.ok
+    assert missing.reason and "#submit" in missing.reason
+
     result = verifier.verify(
-        dsl.make_leaf(dsl.DSLVerb.CLICK, "#submit"),
+        leaf,
         trace=[],
         context={"selectors": ["#submit"]},
     )
