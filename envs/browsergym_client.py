@@ -107,10 +107,13 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
         return (obs, info) if return_info else obs
 
     def step(
-        self, action: PlannerAction
+        self, action: BrowserAction | PlannerAction
     ) -> Tuple[Dict[str, Any], float, bool, bool, Dict[str, Any]]:
         """Convert planner action to BrowserGym action and step environment."""
-        env_action = self._planner_action_to_browser_action(action)
+        if isinstance(action, PlannerAction):
+            env_action = self._planner_action_to_browser_action(action)
+        else:
+            env_action = action
         start = time.perf_counter()
         obs, reward, terminated, truncated, info = self.env.step(env_action)  # type: ignore[arg-type]
         latency = time.perf_counter() - start
