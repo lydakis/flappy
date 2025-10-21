@@ -15,6 +15,56 @@ class DummyCoach:
     pass
 
 
+class StubEpisodeEnv:
+    def __init__(self) -> None:
+        self.agent = None
+        self.reset_entropy_lengths: list[int] = []
+        self._step_calls = 0
+
+    def attach(self, agent: HybridAgent) -> None:
+        self.agent = agent
+
+    def reset(self, return_info: bool = False):
+        if self.agent is None:
+            raise RuntimeError("Agent must be attached before resetting the environment.")
+        self.reset_entropy_lengths.append(len(self.agent.entropy_window))
+        self._step_calls = 0
+        obs = {"dom_object": {"strings": []}}
+        info = {"success": False, "episode_reward": 0.0}
+        if return_info:
+            return obs, info
+        return obs
+
+    def encode_observation(self, obs):
+        return {"dom_text": ""}
+
+    def step(self, action):
+        self._step_calls += 1
+        obs = {"dom_object": {"strings": []}}
+        info = {"success": False, "episode_reward": 0.0, "policy_entropy": 0.5}
+        done = self._step_calls >= 1
+        return obs, 0.0, done, False, info
+
+
+class RecordingCoach:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def advise(
+        self,
+        *,
+        task_id: str,
+        dom_summary: str,
+        recent_actions,
+        inventory,
+        notes,
+        blackboard,
+        target_map: str = "",
+    ) -> CoachDirective:
+        self.calls.append(task_id)
+        return CoachDirective(subgoal="inspect")
+
+
 def build_agent() -> HybridAgent:
     env = DummyEnv()
     coach = DummyCoach()
@@ -189,3 +239,27 @@ def test_submit_unlocked_after_targets_completed():
     assert agent._guardrail_submit_locked is False
     allow_patterns = set(agent.current_directive.mask_delta.allow)
     assert any(pattern in allow_patterns for pattern in ("#subbtn", "click #subbtn"))
+
+
+def test_entropy_window_reset_between_episodes():
+    env = StubEpisodeEnv()
+    coach = RecordingCoach()
+    agent = HybridAgent(env=env, coach=coach, learner=None, memory=None, max_steps=1)
+    env.attach(agent)
+
+    high_entropy = agent.stuck_entropy_threshold + 1.0
+
+    agent.entropy_window.extend([high_entropy, high_entropy])
+    first_before = agent.interventions
+    agent.run_episode("task-reset")
+    assert env.reset_entropy_lengths[0] == 0
+    assert agent.interventions - first_before == 1
+    assert len(coach.calls) == 1
+
+    agent.entropy_window.extend([high_entropy])
+    second_before = agent.interventions
+    agent.run_episode("task-reset")
+    assert env.reset_entropy_lengths[1] == 0
+    assert agent.interventions - second_before == 1
+    assert len(coach.calls) == 2
+    assert env.reset_entropy_lengths == [0, 0]
