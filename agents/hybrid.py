@@ -388,7 +388,16 @@ class HybridAgent:
             if "(" in token and token.endswith(")"):
                 prefix, arg_str = token.split("(", 1)
                 verb_name = prefix.strip()
-                args = [arg_str[:-1]] if arg_str.endswith(")") else [arg_str]
+                if arg_str.endswith(")"):
+                    arg_str = arg_str[:-1]
+                raw_args = [part for part in arg_str.split(",") if part.strip()]
+
+                def _clean_argument(value: str) -> str:
+                    cleaned = value.strip().rstrip(")").strip()
+                    cleaned = cleaned.strip("\"'")
+                    return cleaned
+
+                args = [_clean_argument(part) for part in raw_args]
             try:
                 verb = DSLVerb(verb_name)
             except ValueError:
