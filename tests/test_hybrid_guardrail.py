@@ -15,6 +15,60 @@ class DummyCoach:
     pass
 
 
+class EpisodeEnv:
+    def __init__(self, steps_before_done: int = 1) -> None:
+        self.steps_before_done = steps_before_done
+        self._step_count = 0
+
+    def reset(self, return_info: bool = True) -> tuple[dict, dict] | dict:
+        self._step_count = 0
+        obs = {
+            "dom_text": "",
+            "dom_object": {"strings": []},
+        }
+        info = {"episode_reward": 0.0, "success": False}
+        return (obs, info) if return_info else obs
+
+    def encode_observation(self, obs: dict) -> dict:
+        return {"dom_text": obs.get("dom_text", "")}
+
+    def step(self, action) -> tuple[dict, float, bool, bool, dict]:
+        self._step_count += 1
+        obs = {
+            "dom_text": "",
+            "dom_object": {"strings": []},
+        }
+        terminated = self._step_count >= self.steps_before_done
+        info = {
+            "episode_reward": 0.0,
+            "success": False,
+            "policy_entropy": 0.0,
+        }
+        return obs, 0.0, terminated, False, info
+
+
+class CountingCoach:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def advise(
+        self,
+        *,
+        task_id: str,
+        dom_summary: str,
+        recent_actions,
+        inventory,
+        notes: str,
+        blackboard,
+        target_map: str,
+    ) -> CoachDirective:
+        self.calls += 1
+        return CoachDirective(subgoal="test", mask_delta=MaskDelta())
+
+    def reflect(self, task_id: str, episode_trace) -> str:
+        return ""
+
+
 def build_agent() -> HybridAgent:
     env = DummyEnv()
     coach = DummyCoach()
@@ -189,3 +243,23 @@ def test_submit_unlocked_after_targets_completed():
     assert agent._guardrail_submit_locked is False
     allow_patterns = set(agent.current_directive.mask_delta.allow)
     assert any(pattern in allow_patterns for pattern in ("#subbtn", "click #subbtn"))
+
+
+def test_coach_interventions_reset_each_episode():
+    env = EpisodeEnv()
+    coach = CountingCoach()
+    agent = HybridAgent(
+        env=env,
+        coach=coach,
+        learner=None,
+        memory=None,
+        planner_interval=50,
+        max_steps=2,
+    )
+
+    first_episode = agent.run_episode("task-1")
+    second_episode = agent.run_episode("task-1")
+
+    assert first_episode["coach_interventions"] == 1.0
+    assert second_episode["coach_interventions"] == 1.0
+    assert coach.calls == 2

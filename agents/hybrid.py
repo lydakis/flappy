@@ -123,6 +123,7 @@ class HybridAgent:
         episode_id = str(uuid.uuid4())
         episode_trace: List[str] = []
         intrinsic_total = 0.0
+        self.interventions = 0
         self.blackboard.clear()
         self.mask_decision = MaskDecision()
         self._checkbox_targets.clear()
