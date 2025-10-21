@@ -117,6 +117,7 @@ class HybridAgent:
         self._consumed_selectors: set[str] = set()
 
     def run_episode(self, task_id: str) -> Dict[str, float]:
+        self.entropy_window.clear()
         obs, info = self.env.reset(return_info=True)
         observation = self.env.encode_observation(obs)
         reflections = self._retrieve_reflections(task_id)
