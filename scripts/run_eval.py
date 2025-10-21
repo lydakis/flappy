@@ -78,8 +78,8 @@ def main() -> None:
     eval_cfg = EvalConfig(
         frozen=args.frozen, episodes=args.episodes, online_updates=not args.frozen
     )
-    llm_client = OpenAIPlannerClient()
-    coach = Coach(llm_client)
+    llm_client: OpenAIPlannerClient | None = None
+    coach: Coach | None = None
     memory = load_memory(args.memory)
     note_store = NoteStore(pathlib.Path(args.note_store)) if args.note_store else None
     rag = SimpleRAG() if note_store else None
@@ -99,6 +99,10 @@ def main() -> None:
                 rl_agent.model.load(args.checkpoint)  # type: ignore[attr-defined]
             agent = rl_agent
         elif args.agent == "coach_random":
+            if coach is None:
+                llm_client = OpenAIPlannerClient()
+                coach = Coach(llm_client)
+            assert coach is not None  # for type checkers
             agent = CoachRandomAgent(
                 env=env_factory(),
                 coach=coach,
@@ -112,6 +116,10 @@ def main() -> None:
                 ddl_top_k=args.ddl_top_k,
             )
         else:
+            if coach is None:
+                llm_client = OpenAIPlannerClient()
+                coach = Coach(llm_client)
+            assert coach is not None  # for type checkers
             learner = PPORNDLearner()
             if args.checkpoint:
                 learner.load(args.checkpoint)
