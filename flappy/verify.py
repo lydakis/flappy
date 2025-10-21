@@ -59,12 +59,19 @@ class PlanVerifier:
     def _find_missing_selectors(self, node: DSLNode, selectors: Sequence[str]) -> set[str]:
         missing: set[str] = set()
         if node.verb in {DSLVerb.CLICK, DSLVerb.TYPE} and node.args:
-            selector = node.args[0]
+            selector = self._normalise_selector(node.args[0])
             if selector and selectors and selector not in selectors:
                 missing.add(selector)
         for child in node.children:
             missing.update(self._find_missing_selectors(child, selectors))
         return missing
+
+    @staticmethod
+    def _normalise_selector(raw_selector: str) -> str:
+        token = raw_selector.split(",", 1)[0].strip()
+        token = token.rstrip(")").strip()
+        token = token.strip("\"'")
+        return token
 
 
 __all__ = ["PlanVerifier", "VerificationResult", "Predicate"]

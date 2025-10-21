@@ -64,13 +64,20 @@ class PlanSynthesiser:
 
     def _plan_compatible(self, node: DSLNode, selectors: Sequence[str]) -> bool:
         if node.verb in {DSLVerb.CLICK, DSLVerb.TYPE} and node.args:
-            selector = node.args[0]
+            selector = self._normalise_selector(node.args[0])
             if selector and selectors and selector not in selectors:
                 return False
         for child in node.children:
             if not self._plan_compatible(child, selectors):
                 return False
         return True
+
+    @staticmethod
+    def _normalise_selector(raw_selector: str) -> str:
+        token = raw_selector.split(",", 1)[0].strip()
+        token = token.rstrip(")").strip()
+        token = token.strip("\"'")
+        return token
 
 
 __all__ = ["Sketch", "CandidatePlan", "PlanSynthesiser"]
