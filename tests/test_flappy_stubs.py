@@ -45,6 +45,15 @@ def test_plan_synthesiser_identity():
     assert proposals[0].root.to_dict() == leaf.to_dict()
 
 
+def test_plan_synthesiser_empty_selectors_rejects_missing():
+    leaf = dsl.make_leaf(dsl.DSLVerb.CLICK, "#missing")
+    sketch = synth.Sketch(root=leaf, holes=[])
+    proposals = list(
+        synth.PlanSynthesiser().enumerate(sketch, context={"selectors": []})
+    )
+    assert not proposals
+
+
 def test_verifier_stub():
     verifier = verify.PlanVerifier()
     result = verifier.verify(
