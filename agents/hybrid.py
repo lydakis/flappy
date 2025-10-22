@@ -116,13 +116,9 @@ class HybridAgent:
         self._macro_usage_pending = False
         self._consumed_selectors: set[str] = set()
 
-    def run_episode(self, task_id: str) -> Dict[str, float]:
-        obs, info = self.env.reset(return_info=True)
-        observation = self.env.encode_observation(obs)
-        reflections = self._retrieve_reflections(task_id)
-        episode_id = str(uuid.uuid4())
-        episode_trace: List[str] = []
-        intrinsic_total = 0.0
+    def _reset_episode_state(self) -> None:
+        self.interventions = 0
+        self.recent_actions.clear()
         self.blackboard.clear()
         self.mask_decision = MaskDecision()
         self._checkbox_targets.clear()
@@ -146,6 +142,16 @@ class HybridAgent:
         self._plan_verified = None
         self._current_macro_name = None
         self._macro_usage_pending = False
+        self.current_inventory = []
+
+    def run_episode(self, task_id: str) -> Dict[str, float]:
+        obs, info = self.env.reset(return_info=True)
+        observation = self.env.encode_observation(obs)
+        reflections = self._retrieve_reflections(task_id)
+        episode_id = str(uuid.uuid4())
+        episode_trace: List[str] = []
+        intrinsic_total = 0.0
+        self._reset_episode_state()
 
         action_candidates, inventory_strings = self._action_catalog(obs)
         if not action_candidates:
