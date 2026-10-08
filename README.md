@@ -142,3 +142,11 @@ Training & evaluation workflow
 
    Accepted hypotheses are appended to `ideas.jsonl`. Pass `--ddl-inject` and `--idea-store ideas.jsonl`
    to `scripts/run_explore.py` or `scripts/run_eval.py` to let the coach see the latest ideas.
+
+Local learning diagnostics
+--------------------------
+
+See [the reproducibility guide](docs/local-experiments.md) for offline CPU
+controls, integrity fixes, regression checks and historical negative results.
+The [architecture inventory](docs/architectures.md) distinguishes the small
+local networks from the external LLM coach.

@@ -1,0 +1,59 @@
+{
+  "status": "Fixed offline reproduction protocol; no API execution",
+  "seeds": [
+    307,
+    401,
+    503
+  ],
+  "arms": [
+    "current_no_tutor",
+    "board_no_tutor",
+    "current_tutor",
+    "board_tutor"
+  ],
+  "train_streams_per_controller": 4,
+  "assessment_streams_per_controller": 2,
+  "total_streams": 72,
+  "cycles_per_stream": 256,
+  "contracts_per_stream": 8,
+  "cycles_per_contract": 32,
+  "paid_and_practice_cases_each_cycle": 8,
+  "answer_optimizer_steps_per_stream": 2048,
+  "allocator_steps_per_training_stream": 64,
+  "assessment": "Allocator parameters/optimizer frozen as explicitly approved; answer model continuously updates on every practice and paid packet. Per-stream student/memory/wallet reset, no within-stream reset.",
+  "schedule": "Uniform without replacement per seed from all8-contract sequences containing4A/4B and>=2separated runs per skill; first4training and last2assessment; do not select schedules by outcome.",
+  "actions": [
+    "practiceA",
+    "practiceB",
+    "practiceA_query",
+    "practiceB_query"
+  ],
+  "allocator": "47->32tanh, actor4/value1; zero actor weights, initialprobabilities .475,.475,.025,.025. Mask query actions in no-tutor arms. In tutor arms unaffordable or exhausted query requests are denied without charge, still practising selected skill; log raw requests and probabilities separately.",
+  "allocator_input": "Current public family/pay/packets remaining, progress, clipped wallet, remaining query fraction, all completed contract families padded8x3, observed per-family count/accuracyEMA/age; two future cards with family/pay/availability/presence only in board condition. No candidate/current/future case inputs or outcomes enter allocator.",
+  "answer_feedback": "Keep prior per-case PPO correctness signal scaled by the public skill pay (.25/1) for both practice and paid cases; practice earns zero wallet/allocator income. Normal correctness is available for practice independently of its zero monetary income. Existing replay binary-correctness loss and four optimizer steps remain unchanged; optional oracle-label CE only on purchased practice packets.",
+  "wallet": {
+    "initial": 4,
+    "query_fee": 2,
+    "query_cap": 12,
+    "A_pay": 0.25,
+    "B_pay": 1,
+    "loans_approved": false
+  },
+  "memory": "Common balanced_feedback reservoir128 per observed public horizon,32past rows per packet; no target labels or future metadata in buffer; same existing code.",
+  "data": "Independent class and numeric RNGs; uniform class percase, margin.15; SHA256 latenttuple mod5 partitions trainpaid/trainpractice/assessmentpaid/assessmentpractice/probe. Global duplicate rejection among generated cases. Separate candidate pools forA/B; chosen packet revealed afterselection. All pairedarms use identicaldata.",
+  "primary": "Aggregate pre-feedback paid accuracy on first4packets of each return after intervening other family, within seed across2assess streams. Initial appearances reported separately. Promising ifboard_no_tutor gains>=5pp in>=2seeds, pooled netcreditdifference>=0, and each skill mean returnaccuracy across3seedmeans>=.80.",
+  "utility": "Within each boardvisibility, tutor-enabled netincome>=1.05*no-tutor in>=2seeds and no finalmacroaccuracy deficit>5pp. Actual query counts may differ; do not equate capmatching with actualcostmatching.",
+  "retention": "Outcome, not pre-runpassgate: report every per-family boundaryaccuracy and return-maintenance drop>10pp. Prior oldgate remainsfailed. Drops are previous end-of-same-skill-run probe minus probe before returning paid contract, with allowed intervening practice disclosed.",
+  "uncertainty": "Three pairedseedunits; show everyseed,pairedmeans and exploratory95%tdf2 intervals; no treating packets asindependentreplicates, no significance claim.",
+  "limits": {
+    "threads": 1,
+    "nice": 15,
+    "total_execution_seconds": 600,
+    "peak_rss_mib": 1800,
+    "minimum_free_disk_gib": 8,
+    "maximum_new_output_mib": 100,
+    "paid_calls": 0,
+    "max_simulated_queries": 432
+  },
+  "stop": "No outcome-based tuning, reward/cost changes, extra seeds or training beyond 72 streams. Integrity/resource failure stops. No API execution."
+}

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Local cue pilot</title>
+<body>
+<script>
+// Entirely local deterministic test surface. No resources, storage, or requests.
+window.renderTrial = function(cue, trial, variant) {
+  document.body.replaceChildren();
+  const instruction = document.createElement('p');
+  instruction.textContent = 'Click the button named by the current cue.';
+  const label = document.createElement('p');
+  label.textContent = 'Current cue: ' + cue;
+  const context = document.createElement('p');
+  context.textContent = 'Page ' + variant + ', trial ' + trial + ' of 24.';
+  document.body.append(instruction, label, context);
+  window.lastChoice = null;
+  for (const side of ['left', 'right']) {
+    const button = document.createElement('button');
+    button.id = side;
+    button.textContent = side;
+    button.onclick = () => { window.lastChoice = side; };
+    document.body.append(button);
+  }
+};
+</script>
+</body></html>

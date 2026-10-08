@@ -1,0 +1,57 @@
+{
+  "status": "Fixed offline reproduction protocol; no API execution",
+  "scope": "offline diagnosis and minimal feedback-memory intervention; no live tutor, network, credentials, GPU or task board",
+  "seeds": [
+    73,
+    109,
+    211
+  ],
+  "cases_per_run": 2048,
+  "packets_per_run": 256,
+  "packet_size": 8,
+  "variants": {
+    "corrected_blocked": "All three arms, unchanged answer PPO on independently randomized classes in A64/B128/A64 packets",
+    "interleaved": "No-tutor diagnostic only; exactly the same 256 packets uniformly shuffled, same updates and pay",
+    "recent_feedback": "All three arms; add binary correctness replay of 32 previously observed actions per packet from FIFO256, four existing optimizer steps",
+    "balanced_feedback": "All three arms; same replay loss/batch/steps, reservoir128 per previously observed horizon; sample16 from each once both are observed"
+  },
+  "runs": 30,
+  "arms": [
+    "learned",
+    "heuristic",
+    "no_tutor"
+  ],
+  "minimal_intervention": "For retention, change only the selection of stored action/correctness records from FIFO to horizon-balanced reservoirs. Identical model, answer-step count, replay batch size and loss. No stored oracle answer labels or distillation targets.",
+  "replay_loss": "Unit-weight negative binary log likelihood of the probability assigned to the past chosen action: -correct*log(p(action))-(1-correct)*log(1-p(action)). Sample only pre-packet records; add current committed actions/outcomes afterwards. Label-independent replacement; no correctness-based selection.",
+  "data_repair": "Independent uniform class target per case from a separate seeded RNG, rejection-sample numeric state conditional on target; independent within-packet shuffle. No deterministic slot class or exact per-packet class-count constraint. Public projection contains only p,v,horizon, excluding IDs, labels, descriptors, all future fields.",
+  "teacher": "Explicit perfect offline oracle labels for the eight current cases only, acquired after committed answer and ASK decisions. No recorded real responses reused: changed packets/order/query times fail exact-prompt matching and selection validity. Same two-credit synthetic fee and12-query/96-label cap, zero real charge.",
+  "ask": "Reuse 61->32 ASK/SKIP PPO, initialp.05, four epochs every16packets gamma.98 GAE.95 clip.2 lr.001; reward=(actual committed job income-2*granted ask)/8. Can buy labels for current8 cases only; fixed oracle, no teacher/lesson/subset/task choice.",
+  "controls": "Identical packet stream and initial answer weights for every arm of a variant/seed; same answer RNG, updates and replay compute. Learned ASK has extra controller updates; no-tutor never buys labels. Equal allowances are not equal actual calls. No policy selection or tuning from results.",
+  "diagnostics": [
+    "Same-p/v counterfactual horizon pairs: label disagreements quantify missing-horizon ambiguity; full public tuples plus deterministic dynamics uniquely identify target",
+    "Frozen no-tutor post-return models: supplied horizon versus horizon clamped1; distinguish horizon neglect from environment ambiguity",
+    "Same-packets interleaving tests capacity/exposure ordering without extra labels or examples",
+    "FIFO versus balanced replay isolates whether retaining earlier feedback helps beyond identical extra replay compute",
+    "Per-horizon probes at0,64,192,256; frozen state/RNG checks; correct-label probability and confidence errors",
+    "Queries and propensity conditional on remaining affordability/call allowance; label errors are0 by construction; actual help capped and denials separate"
+  ],
+  "integrity_gate": "All projections/invariance/query-order tests pass; independent seed-independent slot classifier held-out accuracy <=0.35; max in-sample slot-majority <=0.35 perstream; no identical-class-count packet design; unique train latent tuples disjoint from probes; all oracle targets verify by direct equation; ledgers unchanged; no networking/credential access; no future-outcome input",
+  "learnability_retention_gate": {
+    "variant": "balanced_feedback",
+    "scope": "each of three arms in each of three seeds",
+    "active_h1_at64": 0.85,
+    "active_h2_at192": 0.85,
+    "h1_at192": 0.8,
+    "both_horizons_at256": 0.8,
+    "max_h1_drop_64_to192_pp": 10,
+    "max_h2_drop_192_to256_pp": 10,
+    "learned_ask_weights_change": true,
+    "learned_granted_queries_range": [
+      1,
+      12
+    ]
+  },
+  "learned_help_utility_gate": "Separate from basic learnability: learned net income>=1.05*both controls in>=2/3 seeds, with no final macro loss>5pp vs heuristic. Does not make an oracle diagnostic evidence about real noisy LLM tutoring.",
+  "stop": "No hyperparameter/seed/model changes after results. Stop if integrity fails or balanced feedback misses the predeclared retention/learnability gate. Do not expand the experiment to a task-board comparison or make API calls.",
+  "resources": "CPU1 nice15; wall600s total; processRSS1800MiB; minimumfreeDisk8GiB; no new dependencies"
+}
