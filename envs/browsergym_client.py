@@ -173,9 +173,7 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
             },
             "scroll": {
                 "type": "object",
-                "properties": {
-                    "direction": {"type": "string", "enum": ["up", "down"]}
-                },
+                "properties": {"direction": {"type": "string", "enum": ["up", "down"]}},
                 "required": ["direction"],
             },
             "wait": {
@@ -203,7 +201,7 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
                 f"elem = page.wait_for_selector({selector}, state='visible', timeout={timeout_ms})\n"
                 "if elem is None:\n"
                 f"    raise ValueError('Selector not found: {action.selector}')\n"
-                "elem.click(timeout=5000, force=True)\n"
+                "elem.click(timeout=5000)\n"
             )
         if name == "type":
             if not action.selector:
@@ -231,7 +229,7 @@ class BrowserGymEnvWrapper(gym.Env if gym else object):
             key = json.dumps(action.key or "")
             if not action.key:
                 raise ValueError("press action requires a key")
-            return focus_snippet + f"page.keyboard.press({key}, timeout=5000)\n"
+            return focus_snippet + f"page.keyboard.press({key})\n"
         if name == "scroll":
             direction = (action.direction or "down").lower()
             delta = 400 if direction == "down" else -400

@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, Protocol
+from typing import Callable, Dict, Protocol
 
 import yaml
 
 from envs.browsergym_client import BrowserGymEnvWrapper
-from eval.metrics import EpisodeStats, average_reward, normalized_return, steps_to_success, success_rate
+from eval.metrics import (
+    EpisodeStats,
+    average_reward,
+    normalized_return,
+    steps_to_success,
+    success_rate,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class AgentProtocol(Protocol):
-    def run_episode(self, task_id: str) -> Dict[str, float]:
-        ...
+    def run_episode(self, task_id: str) -> Dict[str, float]: ...
 
 
 @dataclass
@@ -24,6 +30,25 @@ class EvalConfig:
     frozen: bool
     episodes: int
     online_updates: bool
+
+
+@contextmanager
+def evaluation_mode(agent: AgentProtocol, config: EvalConfig):
+    """Restore learning and reflection settings even when evaluation fails."""
+    training = not config.frozen and config.online_updates
+    previous_training = getattr(agent, "training", True)
+    previous_read_only = getattr(agent, "reflexion_read_only", None)
+    try:
+        if hasattr(agent, "set_training"):
+            agent.set_training(training)
+        if previous_read_only is not None and not training:
+            agent.reflexion_read_only = True
+        yield
+    finally:
+        if hasattr(agent, "set_training"):
+            agent.set_training(previous_training)
+        if previous_read_only is not None:
+            agent.reflexion_read_only = previous_read_only
 
 
 def load_task_list(path: str) -> Dict[str, Dict]:
@@ -39,12 +64,12 @@ def evaluate_agent(
     eval_config: EvalConfig,
 ) -> Dict[str, float]:
     stats: Dict[str, float] = {}
-    episodes: Iterable[EpisodeStats] = []
     results = []
     intervention_totals: float = 0.0
     intervention_count = 0
     for _ in range(eval_config.episodes):
-        outcome = agent.run_episode(task_config["id"])
+        with evaluation_mode(agent, eval_config):
+            outcome = agent.run_episode(task_config["id"])
         if "coach_interventions" in outcome:
             intervention_totals += float(outcome["coach_interventions"])
             intervention_count += 1

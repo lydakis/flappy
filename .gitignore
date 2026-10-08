@@ -17,3 +17,26 @@ __pycache__/
 # Checkpoint directories (add specific files later if desired)
 checkpoints/
 logs/
+
+# Credentials, machine state and research outputs
+.env.*
+**/.env*
+!.env.example
+!**/.env.example
+*.pem
+*.key
+credentials*.json
+*budget*.json
+*ledger*.json
+*spending-receipt*.json
+*.pt
+*.pth
+*.ckpt
+*.zip
+*.tar
+*.tar.gz
+*.patch
+.browsers/
+.python/
+.ruff_cache/
+.DS_Store

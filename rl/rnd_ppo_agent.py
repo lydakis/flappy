@@ -46,6 +46,7 @@ class LearnerConfig:
     entropy_coef: float = 0.01
     value_coef: float = 0.5
     clip_range: float = 0.2
+    use_policy_mask: bool = False  # The legacy mask head has no training objective.
 
 
 @dataclass
@@ -147,10 +148,19 @@ class PPORNDLearner:
         )
         self.rollout: List[Transition] = []
         self.total_steps = 0
+        self.training = True
+        self.policy_updates = 0
+        self.optimizer_steps = 0
+        self.rnd_updates = 0
+        self.last_update: dict = {}
         self._running_mean = 0.0
         self._running_var = 1.0
         self._count = 1e-4
 
+    def set_training(self, training: bool) -> None:
+        self.training = bool(training)
+
+    @torch.no_grad()
     def sample_action_with_context(
         self,
         state_vec: np.ndarray,
@@ -162,16 +172,21 @@ class PPORNDLearner:
         coach_mask: Optional[np.ndarray] = None,
         deterministic: bool = False,
     ) -> SampleOutput:
+        if not 1 <= action_count <= self.config.max_actions:
+            raise ValueError("action_count must be within the policy action capacity")
         effective_policy = policy_mask
-        if effective_policy is None:
+        if effective_policy is None and self.config.use_policy_mask:
             effective_policy = self.policy.predict_mask(state_vec, subgoal_vec)
 
         mask_full = np.zeros(self.config.max_actions, dtype=np.float32)
         mask_full[:action_count] = 1.0
-        if mask is not None:
-            mask_full[: len(mask)] = mask.astype(np.float32)
-        elif effective_policy is not None:
-            mask_full[: len(effective_policy)] = effective_policy.astype(np.float32)
+        supplied = mask if mask is not None else effective_policy
+        if supplied is not None:
+            supplied = np.asarray(supplied, dtype=np.float32).reshape(-1)
+            if not np.isfinite(supplied).all() or (supplied < 0).any():
+                raise ValueError("Action mask must be finite and nonnegative")
+            limit = min(action_count, len(supplied))
+            mask_full[:limit] = supplied[:limit]
         if mask_full[:action_count].sum() == 0.0:
             mask_full[:action_count] = 1.0
 
@@ -181,8 +196,7 @@ class PPORNDLearner:
         subgoal = torch.from_numpy(subgoal_vec.astype(np.float32)).unsqueeze(0)
         mask_tensor = torch.from_numpy(mask_full.astype(np.float32)).unsqueeze(0)
         logits = self.policy.forward(state, subgoal, mask_tensor)
-        probs = torch.softmax(logits, dim=-1)
-        dist = torch.distributions.Categorical(probs=probs)
+        dist = torch.distributions.Categorical(logits=logits)
         log_prob = float(dist.log_prob(torch.tensor([action])).item())
         value = float(self.value_net(state, subgoal).item())
         entropy = float(dist.entropy().mean().item())
@@ -215,6 +229,8 @@ class PPORNDLearner:
         subgoal_vec: np.ndarray,
         action_count: int,
     ) -> Optional[np.ndarray]:
+        if not self.config.use_policy_mask:
+            return None
         predicted = self.policy.predict_mask(state_vec, subgoal_vec)
         if predicted is None:
             return None
@@ -227,23 +243,30 @@ class PPORNDLearner:
         state_tensor = torch.from_numpy(next_state.astype(np.float32)).unsqueeze(0)
         with torch.no_grad():
             target = self.rnd_module.target(state_tensor)
-        prediction = self.rnd_module.predictor(state_tensor)
-        loss = F.mse_loss(prediction, target.detach())
-        self.rnd_optimizer.zero_grad()
-        loss.backward()
-        self.rnd_optimizer.step()
+        with torch.set_grad_enabled(self.training):
+            prediction = self.rnd_module.predictor(state_tensor)
+            loss = F.mse_loss(prediction, target.detach())
+        if not torch.isfinite(loss):
+            raise FloatingPointError("Nonfinite RND loss")
+        if self.training:
+            self.rnd_optimizer.zero_grad()
+            loss.backward()
+            self.rnd_optimizer.step()
+            self.rnd_updates += 1
         error = (prediction.detach() - target.detach()).pow(2).mean().item()
         if not self.rnd_config.normalize_rewards:
             return error
-        self._update_running_stats(error)
-        return (error - self._running_mean) / (np.sqrt(self._running_var) + 1e-8)
+        if self.training:
+            self._update_running_stats(error)
+        return error / (np.sqrt(self._running_var) + 1e-8)
 
     def _update_running_stats(self, value: float) -> None:
+        m2 = self._running_var * self._count
         self._count += 1
         delta = value - self._running_mean
         self._running_mean += delta / self._count
         delta2 = value - self._running_mean
-        self._running_var += delta * delta2
+        self._running_var = (m2 + delta * delta2) / self._count
 
     def observe_transition(
         self,
@@ -257,6 +280,8 @@ class PPORNDLearner:
         next_state: np.ndarray,
         next_subgoal: np.ndarray,
     ) -> None:
+        if not self.training:
+            return
         transition = Transition(
             state=state.astype(np.float32),
             subgoal=subgoal.astype(np.float32),
@@ -270,10 +295,14 @@ class PPORNDLearner:
             next_state=next_state.astype(np.float32),
             next_subgoal=next_subgoal.astype(np.float32),
             policy_mask=(
-                sample.policy_mask.astype(np.float32) if sample.policy_mask is not None else None
+                sample.policy_mask.astype(np.float32)
+                if sample.policy_mask is not None
+                else None
             ),
             coach_mask=(
-                sample.coach_mask.astype(np.float32) if sample.coach_mask is not None else None
+                sample.coach_mask.astype(np.float32)
+                if sample.coach_mask is not None
+                else None
             ),
         )
         self.rollout.append(transition)
@@ -283,7 +312,7 @@ class PPORNDLearner:
             self.rollout.clear()
 
     def _update_policy(self) -> None:
-        if not self.rollout:
+        if not self.training or not self.rollout:
             return
         batch = self.rollout
         rewards = np.array([t.reward for t in batch], dtype=np.float32)
@@ -313,7 +342,10 @@ class PPORNDLearner:
                 + self.config.gamma * next_values[step] * (1.0 - dones[step])
                 - values[step]
             )
-            gae = delta + self.config.gamma * self.config.gae_lambda * (1.0 - dones[step]) * gae
+            gae = (
+                delta
+                + self.config.gamma * self.config.gae_lambda * (1.0 - dones[step]) * gae
+            )
             advantages[step] = gae
             returns[step] = gae + values[step]
 
@@ -343,12 +375,18 @@ class PPORNDLearner:
                 mb_adv = adv_t[mb_idx]
 
                 logits = self.policy.forward(mb_states, mb_subgoals, mb_masks)
-                probs = torch.softmax(logits, dim=-1)
-                dist = torch.distributions.Categorical(probs=probs)
+                dist = torch.distributions.Categorical(logits=logits)
                 log_probs = dist.log_prob(mb_actions)
                 ratio = torch.exp(log_probs - mb_old_log)
                 unclipped = ratio * mb_adv
-                clipped = torch.clamp(ratio, 1.0 - self.config.clip_range, 1.0 + self.config.clip_range) * mb_adv
+                clipped = (
+                    torch.clamp(
+                        ratio,
+                        1.0 - self.config.clip_range,
+                        1.0 + self.config.clip_range,
+                    )
+                    * mb_adv
+                )
                 policy_loss = -torch.min(unclipped, clipped).mean()
 
                 values_pred = self.value_net(mb_states, mb_subgoals).squeeze(-1)
@@ -360,15 +398,32 @@ class PPORNDLearner:
                     + self.config.value_coef * value_loss
                     - self.config.entropy_coef * entropy
                 )
+                if not torch.isfinite(loss):
+                    raise FloatingPointError("Nonfinite PPO loss")
 
                 self.optimizer.zero_grad()
                 loss.backward()
                 nn.utils.clip_grad_norm_(
-                    list(self.policy.parameters()) + list(self.value_net.parameters()), 1.0
+                    list(self.policy.parameters()) + list(self.value_net.parameters()),
+                    1.0,
+                    error_if_nonfinite=True,
                 )
                 self.optimizer.step()
+                self.optimizer_steps += 1
 
-        logger.debug("PPO update completed on %d samples", dataset_size)
+        self.policy_updates += 1
+        self.last_update = {
+            "policy_updates": self.policy_updates,
+            "optimizer_steps": self.optimizer_steps,
+            "samples": dataset_size,
+            "total_steps": self.total_steps,
+            "policy_loss": float(policy_loss.detach()),
+            "value_loss": float(value_loss.detach()),
+            "entropy": float(entropy.detach()),
+            "reward_mean": float(rewards.mean()),
+            "intrinsic_mean": float(intrinsic.mean()),
+        }
+        logger.info("PPO update: %s", self.last_update)
 
     def save(self, path: str) -> None:
         torch.save(
@@ -381,6 +436,11 @@ class PPORNDLearner:
                 "total_steps": self.total_steps,
                 "config": asdict(self.config),
                 "rnd_config": asdict(self.rnd_config),
+                "policy_updates": self.policy_updates,
+                "optimizer_steps": self.optimizer_steps,
+                "rnd_updates": self.rnd_updates,
+                "last_update": self.last_update,
+                "running_stats": [self._running_mean, self._running_var, self._count],
             },
             path,
         )
@@ -393,13 +453,25 @@ class PPORNDLearner:
         self.optimizer.load_state_dict(checkpoint["optimizer"])
         self.rnd_optimizer.load_state_dict(checkpoint["rnd_opt"])
         self.total_steps = int(checkpoint.get("total_steps", 0))
+        self.policy_updates = int(checkpoint.get("policy_updates", 0))
+        self.optimizer_steps = int(checkpoint.get("optimizer_steps", 0))
+        self.rnd_updates = int(checkpoint.get("rnd_updates", 0))
+        self.last_update = checkpoint.get("last_update", {})
+        if "running_stats" in checkpoint:
+            self._running_mean, self._running_var, self._count = checkpoint[
+                "running_stats"
+            ]
         self.rollout.clear()
         saved_config = checkpoint.get("config")
         if saved_config and saved_config != asdict(self.config):
-            logger.warning("LearnerConfig mismatch when loading checkpoint. Using current config.")
+            logger.warning(
+                "LearnerConfig mismatch when loading checkpoint. Using current config."
+            )
         saved_rnd = checkpoint.get("rnd_config")
         if saved_rnd and saved_rnd != asdict(self.rnd_config):
-            logger.warning("RNDConfig mismatch when loading checkpoint. Using current config.")
+            logger.warning(
+                "RNDConfig mismatch when loading checkpoint. Using current config."
+            )
 
     @property
     def max_actions(self) -> int:

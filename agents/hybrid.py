@@ -14,7 +14,11 @@ from typing import Any, Deque, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
-from envs.browsergym_client import BrowserGymEnvWrapper, PlannerAction, make_planner_action
+from envs.browsergym_client import (
+    BrowserGymEnvWrapper,
+    PlannerAction,
+    make_planner_action,
+)
 from envs.selectors import extract_interactive_selectors
 from llm.coach import Coach, CoachDirective
 from llm.ideas import Idea, IdeaStore
@@ -60,16 +64,25 @@ class HybridAgent:
         idea_store: Optional[IdeaStore] = None,
         ddl_inject: bool = False,
         ddl_top_k: int = 3,
+        training: bool = True,
+        guardrails_enabled: bool = True,
     ) -> None:
         self.env = env
         self.coach = coach
         self.learner = learner
+        self.training = training
+        self.guardrails_enabled = guardrails_enabled
+        if learner is not None:
+            learner.set_training(training)
+        self.learner_failures = 0
         self.memory = memory
         self.planner_interval = planner_interval
         self.max_steps = max_steps
         self.reflexion_enabled = reflexion_enabled
         self.reflexion_read_only = reflexion_read_only
-        self.subgoal_encoder = SubgoalEncoder(dim=learner.config.subgoal_dim if learner else 256)
+        self.subgoal_encoder = SubgoalEncoder(
+            dim=learner.config.subgoal_dim if learner else 256
+        )
         feature_dim = learner.config.feature_dim if learner else 2048
         self.state_encoder = DomTextHasher(dim=feature_dim)
         self.recent_actions: Deque[str] = deque(maxlen=20)
@@ -116,13 +129,15 @@ class HybridAgent:
         self._macro_usage_pending = False
         self._consumed_selectors: set[str] = set()
 
-    def run_episode(self, task_id: str) -> Dict[str, float]:
-        obs, info = self.env.reset(return_info=True)
-        observation = self.env.encode_observation(obs)
-        reflections = self._retrieve_reflections(task_id)
-        episode_id = str(uuid.uuid4())
-        episode_trace: List[str] = []
-        intrinsic_total = 0.0
+    def set_training(self, training: bool) -> None:
+        self.training = bool(training)
+        if self.learner is not None:
+            self.learner.set_training(training)
+
+    def _reset_episode_state(self) -> None:
+        self.entropy_window.clear()
+        self.interventions = 0
+        self.recent_actions.clear()
         self.blackboard.clear()
         self.mask_decision = MaskDecision()
         self._checkbox_targets.clear()
@@ -146,6 +161,17 @@ class HybridAgent:
         self._plan_verified = None
         self._current_macro_name = None
         self._macro_usage_pending = False
+        self.current_inventory = []
+
+    def run_episode(self, task_id: str) -> Dict[str, float]:
+        self._reset_episode_state()
+        obs, info = self.env.reset(return_info=True)
+        observation = self.env.encode_observation(obs)
+        reflections = self._retrieve_reflections(task_id)
+        episode_id = str(uuid.uuid4())
+        episode_trace: List[str] = []
+        intrinsic_total = 0.0
+        reward_total = 0.0
 
         action_candidates, inventory_strings = self._action_catalog(obs)
         if not action_candidates:
@@ -194,8 +220,13 @@ class HybridAgent:
 
             self._register_action(planner_action)
             obs, reward, terminated, truncated, info = self.env.step(planner_action)
+            reward_total += float(reward)
             observation = self.env.encode_observation(obs)
-            entropy = sample.entropy if sample is not None else info.get("policy_entropy", 0.0)
+            entropy = (
+                sample.entropy
+                if sample is not None
+                else info.get("policy_entropy", 0.0)
+            )
             self._update_entropy(entropy)
             self._update_driver_signals(
                 entropy=entropy,
@@ -216,7 +247,7 @@ class HybridAgent:
             next_state_vec = self._state_vector(observation)
             next_subgoal_vec = self.current_subgoal_vec.copy()
 
-            if self.learner is not None and sample is not None:
+            if self.training and self.learner is not None and sample is not None:
                 intrinsic_reward = self.learner.compute_intrinsic(next_state_vec)
                 intrinsic_total += intrinsic_reward
                 self.learner.observe_transition(
@@ -225,7 +256,8 @@ class HybridAgent:
                     sample=sample,
                     reward=reward,
                     intrinsic=intrinsic_reward,
-                    done=bool(terminated or truncated),
+                    # The agent's configured finite horizon is an episode boundary too.
+                    done=bool(terminated or truncated or step + 1 == self.max_steps),
                     next_state=next_state_vec,
                     next_subgoal=next_subgoal_vec,
                 )
@@ -234,13 +266,17 @@ class HybridAgent:
                 break
 
         success = bool(info.get("success", False))
-        reward_total = float(info.get("episode_reward", 0.0))
 
         if self._current_macro_name and self._macro_usage_pending:
             self.macro_registry.record_success(self._current_macro_name, success)
             self._macro_usage_pending = False
 
-        if self.reflexion_enabled and self.memory and not self.reflexion_read_only:
+        if (
+            self.training
+            and self.reflexion_enabled
+            and self.memory
+            and not self.reflexion_read_only
+        ):
             reflection_text = self.coach.reflect(task_id, episode_trace)
             if reflection_text:
                 entry = MemoryEntry(
@@ -262,14 +298,21 @@ class HybridAgent:
             "steps": step + 1,
             "coach_interventions": float(self.interventions),
             "intrinsic_reward": intrinsic_total,
+            "learner_failures": self.learner_failures,
+            "learner_active": self.learner is not None,
+            "ppo_updates": (
+                self.learner.policy_updates if self.learner is not None else 0
+            ),
             "trace": list(episode_trace),
             "targets_total": len(self._checkbox_targets),
             "targets_checked": len(self._checked_selectors),
             "targets_completed": float(self._targets_completed()),
             "submit_guardrail_steps": float(self._submit_guardrail_steps),
-            "mask_iou": self._mask_iou_sum / self._mask_iou_count
-            if self._mask_iou_count
-            else None,
+            "mask_iou": (
+                self._mask_iou_sum / self._mask_iou_count
+                if self._mask_iou_count
+                else None
+            ),
             "mask_source_last": self._last_mask_source,
             "mask_source_counts": dict(self._mask_source_counts),
             "notes_written": self._notes_episode_count,
@@ -305,18 +348,24 @@ class HybridAgent:
                 coach_mask=mask_decision.coach,
             )
             action_idx = int(sample.action)
-        except Exception as exc:  # pragma: no cover - learner optional
-            logger.warning("Learner sample failed, falling back to random: %s", exc)
-            self.learner = None
-            return random.choice(valid_indices), None
+        except Exception:
+            self.learner_failures += 1
+            logger.exception("Learner sampling failed; aborting the run")
+            raise
         if action_idx not in valid_indices:
-            action_idx = random.choice(valid_indices)
+            self.learner_failures += 1
+            raise RuntimeError(
+                "Learner selected an invalid action; PPO log probability would be wrong"
+            )
         return action_idx, sample
 
     def _should_request_guidance(self, step: int, info: Dict[str, float]) -> bool:
         if step > 0 and step % self.planner_interval == 0:
             return True
-        if self.entropy_window and np.mean(self.entropy_window) > self.stuck_entropy_threshold:
+        if (
+            self.entropy_window
+            and np.mean(self.entropy_window) > self.stuck_entropy_threshold
+        ):
             return True
         if info.get("stuck", False):
             return True
@@ -414,7 +463,9 @@ class HybridAgent:
                 selectors = self._current_selectors()
                 context = {"selectors": selectors}
                 candidates = list(
-                    self.synthesiser.enumerate(sketch, max_candidates=1, context=context)
+                    self.synthesiser.enumerate(
+                        sketch, max_candidates=1, context=context
+                    )
                 )
                 if candidates:
                     self.current_plan = candidates[0].root
@@ -497,7 +548,10 @@ class HybridAgent:
             if not self._checkbox_targets:
                 return "(none)"
             return ", ".join(sorted(self._checkbox_targets))
-        items = [f"{label}: {selector}" for label, selector in sorted(self._label_to_selector.items())]
+        items = [
+            f"{label}: {selector}"
+            for label, selector in sorted(self._label_to_selector.items())
+        ]
         return "\n".join(items)
 
     def _resolve_masks(
@@ -524,11 +578,14 @@ class HybridAgent:
                 iou = np.logical_and(coach_binary, policy_binary).sum() / float(union)
             self._mask_iou_sum += float(iou)
             self._mask_iou_count += 1
-        decision = self._apply_guardrails(decision, action_candidates)
+        if self.guardrails_enabled:
+            decision = self._apply_guardrails(decision, action_candidates)
         self.mask_decision = decision
         return decision
 
-    def _policy_mask(self, state_vec: np.ndarray, action_count: int) -> Optional[np.ndarray]:
+    def _policy_mask(
+        self, state_vec: np.ndarray, action_count: int
+    ) -> Optional[np.ndarray]:
         if self.learner is None or not hasattr(self.learner, "predict_action_mask"):
             return None
         try:
@@ -565,7 +622,11 @@ class HybridAgent:
                 if action.name != "click" or not action.selector:
                     continue
                 selector = action.selector
-                if selector.startswith("#ch") and selector not in self._checkbox_targets and selector not in self._submit_selectors:
+                if (
+                    selector.startswith("#ch")
+                    and selector not in self._checkbox_targets
+                    and selector not in self._submit_selectors
+                ):
                     decision.final[idx] = 0.0
                     guardrail_applied = True
             if pending_targets:
@@ -583,7 +644,10 @@ class HybridAgent:
                 for idx, action in enumerate(action_candidates):
                     if idx >= decision.final.size:
                         continue
-                    if action.name == "click" and action.selector in self._submit_selectors:
+                    if (
+                        action.name == "click"
+                        and action.selector in self._submit_selectors
+                    ):
                         if decision.final[idx] <= 0.0:
                             decision.final[idx] = 1.0
                             guardrail_applied = True
@@ -627,6 +691,8 @@ class HybridAgent:
         raw_obs: Dict[str, Any],
         action_candidates: Sequence[PlannerAction],
     ) -> None:
+        if not self.guardrails_enabled:
+            return
         self._extract_checkbox_targets(raw_obs)
         self._identify_submit_selectors(action_candidates)
 
@@ -643,8 +709,12 @@ class HybridAgent:
         selectors = {mapping[label] for label in labels if label in mapping}
         if selectors:
             self._checkbox_targets = selectors
-            self._checked_selectors = {sel for sel in self._checked_selectors if sel in selectors}
-        self._label_to_selector = {label: mapping[label] for label in labels if label in mapping}
+            self._checked_selectors = {
+                sel for sel in self._checked_selectors if sel in selectors
+            }
+        self._label_to_selector = {
+            label: mapping[label] for label in labels if label in mapping
+        }
         self._last_goal_text = goal_text
 
     def _parse_goal_labels(self, goal_text: str) -> List[str]:
@@ -732,7 +802,9 @@ class HybridAgent:
                 return candidate
         return None
 
-    def _identify_submit_selectors(self, action_candidates: Sequence[PlannerAction]) -> None:
+    def _identify_submit_selectors(
+        self, action_candidates: Sequence[PlannerAction]
+    ) -> None:
         for action in action_candidates:
             if action.name != "click" or not action.selector:
                 continue
@@ -745,6 +817,8 @@ class HybridAgent:
                 self._submit_selectors.add(action.selector)
 
     def _register_action(self, action: PlannerAction) -> None:
+        if not self.guardrails_enabled:
+            return
         if action.name != "click" or not action.selector:
             return
         selector = action.selector
@@ -803,7 +877,9 @@ class HybridAgent:
         affordances: List[AffordanceHint] = []
         mask_values = mask_decision.final
         if mask_values.size and action_candidates:
-            top_indices = np.argsort(mask_values)[::-1][: min(3, len(action_candidates))]
+            top_indices = np.argsort(mask_values)[::-1][
+                : min(3, len(action_candidates))
+            ]
             for idx in top_indices:
                 if idx >= len(action_candidates):
                     continue
@@ -865,10 +941,14 @@ class HybridAgent:
             )
         driver_msg.events = events
 
-    def _valid_indices(self, mask: Optional[np.ndarray], action_count: int) -> List[int]:
+    def _valid_indices(
+        self, mask: Optional[np.ndarray], action_count: int
+    ) -> List[int]:
         if mask is None:
             return list(range(action_count))
-        return [idx for idx in range(action_count) if idx < len(mask) and mask[idx] > 0.0]
+        return [
+            idx for idx in range(action_count) if idx < len(mask) and mask[idx] > 0.0
+        ]
 
     def _update_entropy(self, entropy: float) -> None:
         self.entropy_window.append(float(entropy))
@@ -897,7 +977,9 @@ class HybridAgent:
             inventory.append(f"{idx}: {detail}")
         return inventory
 
-    def _match_items(self, patterns: Iterable[str], inventory: Sequence[str]) -> List[int]:
+    def _match_items(
+        self, patterns: Iterable[str], inventory: Sequence[str]
+    ) -> List[int]:
         matches: List[int] = []
         for pattern in patterns:
             pattern_lower = pattern.lower()
@@ -967,7 +1049,9 @@ class HybridAgent:
     def _state_vector(self, observation: Dict[str, str]) -> np.ndarray:
         return self.state_encoder.encode({"dom_text": observation.get("dom_text", "")})
 
-    def _action_catalog(self, raw_obs: Dict[str, Any]) -> Tuple[List[PlannerAction], List[str]]:
+    def _action_catalog(
+        self, raw_obs: Dict[str, Any]
+    ) -> Tuple[List[PlannerAction], List[str]]:
         actions: List[PlannerAction] = []
         action_keys: set[Tuple] = set()
 
@@ -989,7 +1073,9 @@ class HybridAgent:
             try:
                 ensure_path = Path("logs")
                 ensure_path.mkdir(parents=True, exist_ok=True)
-                with (ensure_path / "last_raw_obs.json").open("w", encoding="utf-8") as f:
+                with (ensure_path / "last_raw_obs.json").open(
+                    "w", encoding="utf-8"
+                ) as f:
                     json.dump(raw_obs, f, default=str)
             except Exception as exc:  # pragma: no cover - debug helper
                 logger.debug("Failed to dump raw observation: %s", exc)
@@ -1008,14 +1094,21 @@ class HybridAgent:
                 if not selector:
                     continue
                 tag = (element.get("tag") or element.get("nodeName") or "").lower()
-                input_type = (element.get("type") or element.get("inputType") or "").lower()
+                input_type = (
+                    element.get("type") or element.get("inputType") or ""
+                ).lower()
                 role = (element.get("role") or "").lower()
-                clickable = tag in {"button", "a", "option", "label"} or input_type in {
-                    "button",
-                    "submit",
-                    "checkbox",
-                    "radio",
-                } or role in {"button", "link", "checkbox", "option"}
+                clickable = (
+                    tag in {"button", "a", "option", "label"}
+                    or input_type
+                    in {
+                        "button",
+                        "submit",
+                        "checkbox",
+                        "radio",
+                    }
+                    or role in {"button", "link", "checkbox", "option"}
+                )
                 text_input = tag in {"textarea"} or (
                     tag == "input"
                     and input_type
@@ -1044,12 +1137,20 @@ class HybridAgent:
                     input_type = strings[i + 1]
                     element_id = strings[i + 2]
                     if input_type == "checkbox" and element_id:
-                        add_action(make_planner_action("click", selector=f"#{element_id}"))
+                        add_action(
+                            make_planner_action("click", selector=f"#{element_id}")
+                        )
                 if token == "BUTTON" and i + 1 < len(strings):
                     element_id = strings[i + 1]
                     if element_id:
-                        add_action(make_planner_action("click", selector=f"#{element_id}"))
-                if isinstance(token, str) and token.startswith("ch") and token[2:].isdigit():
+                        add_action(
+                            make_planner_action("click", selector=f"#{element_id}")
+                        )
+                if (
+                    isinstance(token, str)
+                    and token.startswith("ch")
+                    and token[2:].isdigit()
+                ):
                     add_action(make_planner_action("click", selector=f"#{token}"))
 
         if len(actions) < self.max_actions:

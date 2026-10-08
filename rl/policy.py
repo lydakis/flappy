@@ -8,7 +8,6 @@ from typing import Optional
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 @dataclass
@@ -61,7 +60,10 @@ class MaskedCategoricalPolicy(nn.Module):
         latent = self._compute_latent(state_vec, subgoal_vec)
         logits = self.action_head(latent)
         if mask is not None:
-            logits = logits + torch.log(mask.clamp(min=1e-6))
+            # Positive values are soft weights; zero is a hard action constraint.
+            logits = (logits + torch.log(mask.clamp(min=1e-6))).masked_fill(
+                mask <= 0, -torch.inf
+            )
         return logits
 
     @torch.no_grad()
@@ -75,13 +77,14 @@ class MaskedCategoricalPolicy(nn.Module):
         state = torch.from_numpy(state_vec.astype(np.float32)).unsqueeze(0)
         subgoal = torch.from_numpy(subgoal_vec.astype(np.float32)).unsqueeze(0)
         mask_tensor = (
-            torch.from_numpy(mask.astype(np.float32)).unsqueeze(0) if mask is not None else None
+            torch.from_numpy(mask.astype(np.float32)).unsqueeze(0)
+            if mask is not None
+            else None
         )
         logits = self.forward(state, subgoal, mask_tensor)
         if deterministic:
             return int(torch.argmax(logits, dim=-1).item())
-        probs = F.softmax(logits, dim=-1)
-        dist = torch.distributions.Categorical(probs=probs)
+        dist = torch.distributions.Categorical(logits=logits)
         return int(dist.sample().item())
 
     @torch.no_grad()

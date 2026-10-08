@@ -64,7 +64,9 @@ def parse_args() -> argparse.Namespace:
         help="Inject day-dreaming ideas alongside reflections",
     )
     parser.add_argument("--ddl-top-k", type=int, default=3)
-    parser.add_argument("--qa-question", default=None, help="Optional question for RAG answer")
+    parser.add_argument(
+        "--qa-question", default=None, help="Optional question for RAG answer"
+    )
     return parser.parse_args()
 
 
@@ -78,8 +80,8 @@ def main() -> None:
     eval_cfg = EvalConfig(
         frozen=args.frozen, episodes=args.episodes, online_updates=not args.frozen
     )
-    llm_client = OpenAIPlannerClient()
-    coach = Coach(llm_client)
+    llm_client: OpenAIPlannerClient | None = None
+    coach: Coach | None = None
     memory = load_memory(args.memory)
     note_store = NoteStore(pathlib.Path(args.note_store)) if args.note_store else None
     rag = SimpleRAG() if note_store else None
@@ -91,7 +93,9 @@ def main() -> None:
             continue
         logger.info("Evaluating %s on %s", args.agent, task_id)
         env_id = task_id
-        env_factory = lambda: make_env(env_id, args.headless)
+
+        def env_factory(env_id=env_id):
+            return make_env(env_id, args.headless)
 
         if args.agent == "baseline_rl":
             rl_agent = PureRLAgent(env_fn=env_factory)
@@ -99,6 +103,10 @@ def main() -> None:
                 rl_agent.model.load(args.checkpoint)  # type: ignore[attr-defined]
             agent = rl_agent
         elif args.agent == "coach_random":
+            if coach is None:
+                llm_client = OpenAIPlannerClient()
+                coach = Coach(llm_client)
+            assert coach is not None  # for type checkers
             agent = CoachRandomAgent(
                 env=env_factory(),
                 coach=coach,
@@ -112,6 +120,10 @@ def main() -> None:
                 ddl_top_k=args.ddl_top_k,
             )
         else:
+            if coach is None:
+                llm_client = OpenAIPlannerClient()
+                coach = Coach(llm_client)
+            assert coach is not None  # for type checkers
             learner = PPORNDLearner()
             if args.checkpoint:
                 learner.load(args.checkpoint)
