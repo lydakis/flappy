@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 
@@ -11,6 +12,7 @@ class RunLog:
 
     def __init__(self, directory: Path | None, *, tensorboard: bool = True):
         self.events: list[dict] = []
+        self.started = time.monotonic()
         self.directory = directory
         self._stream = None
         self._writer = None
@@ -23,6 +25,7 @@ class RunLog:
                 self._writer = SummaryWriter(str(directory / "tb"))
 
     def event(self, record: dict) -> None:
+        record = {"elapsed_sec": round(time.monotonic() - self.started, 2), **record}
         self.events.append(record)
         if self._stream is not None:
             self._stream.write(json.dumps(record, sort_keys=True) + "\n")
