@@ -184,6 +184,24 @@ class SharedBudget:
             self._write(state)
 
 
+def validate_key(value: str) -> str:
+    """Shape-check an API key without echoing it."""
+    if not re.fullmatch(r"sk-[A-Za-z0-9_-]{20,512}", value):
+        raise BudgetStop("Credential absent, duplicate, placeholder, or invalid")
+    if any(word in value.lower() for word in ("placeholder", "replace", "your_key")):
+        raise BudgetStop("Credential is a placeholder")
+    return value
+
+
+def take_env_key(name: str = "OPENAI_API_KEY") -> str:
+    """Read a key injected into this job's environment and remove it from the
+    environment so no child process inherits it."""
+    value = os.environ.pop(name, None)
+    if value is None:
+        raise BudgetStop("Credential absent from the job environment")
+    return validate_key(value.strip())
+
+
 def read_authorized_key(path: Path) -> str:
     """Parse only the approved untracked regular file, without shell evaluation."""
     tracked = subprocess.run(
@@ -212,17 +230,22 @@ def read_authorized_key(path: Path) -> str:
                 if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
                     value = value[1:-1]
                 values.append(value)
-        if len(values) != 1 or not re.fullmatch(r"sk-[A-Za-z0-9_-]{20,512}", values[0]):
+        if len(values) != 1:
             raise BudgetStop("Credential absent, duplicate, placeholder, or invalid")
-        if any(
-            word in values[0].lower() for word in ("placeholder", "replace", "your_key")
-        ):
-            raise BudgetStop("Credential is a placeholder")
-        return values[0]
+        return validate_key(values[0])
     except BudgetStop:
         raise
     except (OSError, ValueError, UnicodeError):
         raise BudgetStop("Credential could not be parsed safely") from None
+
+
+def _refuse_ambient_auth() -> None:
+    # No debug HTTP/header logging, dotenv discovery, redirects or retries.
+    os.environ["PYTHON_DOTENV_DISABLED"] = "1"
+    if "OPENAI_CUSTOM_HEADERS" in os.environ:
+        raise BudgetStop(
+            "Ambient API headers present; refusing ambiguous authentication"
+        )
 
 
 class BudgetedTeacher:
@@ -236,18 +259,18 @@ class BudgetedTeacher:
     @classmethod
     def from_key_file(cls, budget: SharedBudget, path: Path) -> BudgetedTeacher:
         """Build a client without sending a request or loading other env files."""
-        # No debug HTTP/header logging, dotenv discovery, redirects or retries.
-        os.environ["PYTHON_DOTENV_DISABLED"] = "1"
-        if "OPENAI_CUSTOM_HEADERS" in os.environ:
-            raise BudgetStop(
-                "Ambient API headers present; refusing ambiguous authentication"
-            )
+        _refuse_ambient_auth()
+        return cls.from_key(budget, read_authorized_key(path))
+
+    @classmethod
+    def from_key(cls, budget: SharedBudget, key: str) -> BudgetedTeacher:
+        """Build a client for an already validated key; sends nothing."""
+        _refuse_ambient_auth()
         import httpx2
         from openai import OpenAI
 
         for name in ("openai", "httpx", "httpx2", "httpcore"):
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
-        key = read_authorized_key(path)
         client = OpenAI(
             api_key=key,
             admin_api_key="",
