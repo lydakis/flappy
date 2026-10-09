@@ -36,6 +36,7 @@ class TaskFamily(Protocol):
 
     name: str
     skills: tuple[str, ...]
+    max_tokens: int  # answer length cap for generation
 
     def sample(self, skill: str, difficulty: int, rng: random.Random) -> Task: ...
 

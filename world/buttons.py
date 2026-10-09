@@ -66,6 +66,7 @@ class ButtonsFamily:
 
     name = "buttons"
     skills = ("buttons.form",)
+    max_tokens = 128  # answer length cap for generation
 
     def sample(self, skill: str, difficulty: int, rng: random.Random) -> Task:
         check_difficulty(difficulty)

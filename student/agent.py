@@ -32,7 +32,7 @@ from student.grpo import group_advantages
 from student.model import StudentModel
 from student.runlog import RunLog
 from student.tutor import Tutor
-from world.board import Wallet, World
+from world.board import PAY, Wallet, World
 from world.tasks import MAX_DIFFICULTY, MIN_DIFFICULTY, Grade, Task
 
 ARMS = ("no_tutor", "always_tutor", "progress")
@@ -52,7 +52,9 @@ class Example(NamedTuple):
 class LoopConfig:
     arm: str = "progress"
     learner: str = "sft"
-    practice_value: float = 2.0  # credits a practice success is worth to the student
+    # Help on practice (or when stuck) is valued as this many future jobs at the
+    # task's pay; it pays off later, not on the practice attempt itself.
+    future_jobs: float = 5.0
     plateau_eps: float = 0.1
     train_every: int = 2
     train_steps: int = 2
@@ -164,6 +166,9 @@ class CuriousStudent:
         gain = self.help.sample(task.skill, kind, self.rng) - p_base
         return gain * value > self.tutor.prices[kind]
 
+    def learning_value(self, task: Task) -> float:
+        return self.config.future_jobs * PAY[task.difficulty]
+
     # -- tutoring --------------------------------------------------------------
 
     def _buy(self, kind: str) -> bool:
@@ -182,7 +187,7 @@ class CuriousStudent:
 
     def prepare(self, mode: str, task: Task, pay: float) -> Attempt:
         attempt = Attempt(mode, task, pay, task.prompt)
-        value = pay if mode == "work" else self.config.practice_value
+        value = pay if mode == "work" else self.learning_value(task)
         candidates = ["hint", "worked_example"]
         if self.config.arm == "always_tutor":
             candidates = ["hint"] if mode == "work" else ["worked_example"]
@@ -225,7 +230,9 @@ class CuriousStudent:
         return attempt
 
     def explain(self, attempt: Attempt, answer: str, feedback: str) -> None:
-        if not self.wants("explanation", attempt.task, self.config.practice_value):
+        if not self.wants(
+            "explanation", attempt.task, self.learning_value(attempt.task)
+        ):
             return
         if not self._buy("explanation"):
             return
@@ -266,7 +273,9 @@ class CuriousStudent:
                 continue
             # Paid work is greedy; practice samples to explore new answers.
             answer = self.model.generate(
-                [attempt.prompt], sample=attempt.mode == "practice"
+                [attempt.prompt],
+                sample=attempt.mode == "practice",
+                max_new_tokens=self.world.max_tokens(attempt.task.skill),
             )[0]
             results.append(self.settle(attempt, answer))
         self.ticks += 1
@@ -283,7 +292,11 @@ class CuriousStudent:
         statistics match the single-sample SFT learner.
         """
         task = attempt.task
-        answers = self.model.sample_group(attempt.prompt, self.config.group_size)
+        answers = self.model.sample_group(
+            attempt.prompt,
+            self.config.group_size,
+            max_new_tokens=self.world.max_tokens(task.skill),
+        )
         grades = [self.world.grade(task, a) for a in answers]
         result = self.settle(attempt, answers[0], grades[0])
         rewards = [g.score for g in grades]
@@ -336,7 +349,7 @@ class CuriousStudent:
     def ask_when_stuck(self, task: Task) -> Example | None:
         """All samples failed: buy a tutor solution of this practice task."""
         kind = "worked_example"
-        if not self.wants(kind, task, self.config.practice_value, stuck=True):
+        if not self.wants(kind, task, self.learning_value(task), stuck=True):
             return None
         if not self._buy(kind):
             return None
@@ -514,7 +527,11 @@ def evaluate(
     """Greedy pass rate per skill and per (skill, difficulty); no learning."""
     answers: list[str] = []
     for start in range(0, len(tasks), batch):
-        answers += model.generate([t.prompt for t in tasks[start : start + batch]])
+        chunk = tasks[start : start + batch]
+        answers += model.generate(
+            [t.prompt for t in chunk],
+            max_new_tokens=max(world.max_tokens(t.skill) for t in chunk),
+        )
     cells: dict[str, list[bool]] = defaultdict(list)
     for task, answer in zip(tasks, answers):
         passed = world.grade(task, answer).passed

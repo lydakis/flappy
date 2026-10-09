@@ -40,7 +40,7 @@ class FakeModel:
         self.policy_steps = []
         self.hybrid_steps = []
 
-    def generate(self, prompts, *, sample=False):
+    def generate(self, prompts, *, sample=False, max_new_tokens=None):
         self.prompts += prompts
         smart = self.learn_after is not None and self.trained >= self.learn_after
         return [re.findall(r"'(\w+)'", p)[-1] if smart else "?" for p in prompts]
@@ -51,7 +51,7 @@ class FakeModel:
 
     group_mode = "mixed"  # mixed | fail | pass
 
-    def sample_group(self, prompt, n):
+    def sample_group(self, prompt, n, max_new_tokens=None):
         word = re.findall(r"'(\w+)'", prompt)[-1]
         return {"mixed": ["?", word], "fail": ["?", "?"], "pass": [word, word]}[
             self.group_mode
@@ -193,12 +193,11 @@ def test_hybrid_routes_by_group_outcome():
     group, _ = model.hybrid_steps[-1]
     assert group is not None and sum(group[2]) == pytest.approx(0)
 
-    # All samples pass: no GRPO term, no tutor request.
+    # All samples pass: no GRPO term and no stuck-triggered tutor request.
     model.group_mode = "pass"
-    calls = sum(student.tutor_service.calls.values())
     student.tick()
     assert model.hybrid_steps[-1][0] is None
-    assert sum(student.tutor_service.calls.values()) == calls
+    assert not [e for e in student.log.events if e.get("trigger") == "stuck"]
     summary = student.learning_summary()["per_skill"]
     assert sum(s["mixed"] for s in summary.values()) == 1
     assert sum(s["all_pass"] for s in summary.values()) == 1
@@ -236,3 +235,16 @@ def test_replay_weight_decays_as_a_skill_improves():
         student.tracker.record("toy.echo", 1, True)
     assert student.sft_weight("toy.echo") < before
     assert student.sft_weight("toy.other") == pytest.approx(before)
+
+
+def test_progress_arm_can_afford_to_rescue_a_stuck_skill():
+    # Regression: help on practice was valued at 2 credits, below the 3-credit
+    # worked example, so the progress arm could never ask when stuck.
+    backend = SolvingBackend()
+    model = FakeModel()
+    model.group_mode = "fail"
+    student = make("progress", backend, model=model, learner="hybrid")
+    for _ in range(10):
+        student.tick()
+    stuck = [e for e in student.log.events if e.get("trigger") == "stuck"]
+    assert stuck and all(e["verified"] for e in stuck)

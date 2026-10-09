@@ -357,6 +357,7 @@ class CodeFamily:
 
     name = "code"
     skills = ("code.func",)
+    max_tokens = 320  # answer length cap for generation
 
     def __init__(self, n_cases: int = 8):
         self.n_cases = n_cases

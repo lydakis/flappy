@@ -80,6 +80,9 @@ class World:
     ) -> Task:
         return self.by_skill[skill].sample(skill, difficulty, rng or self.rng)
 
+    def max_tokens(self, skill: str) -> int:
+        return getattr(self.by_skill[skill], "max_tokens", 256)
+
     def grade(self, task: Task, answer: str) -> Grade:
         return self.by_skill[task.skill].grade(task, answer)
 

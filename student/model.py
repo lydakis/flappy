@@ -15,11 +15,19 @@ SYSTEM_PROMPT = (
 
 
 class StudentModel(Protocol):
-    def generate(self, prompts: list[str], *, sample: bool = False) -> list[str]: ...
+    def generate(
+        self,
+        prompts: list[str],
+        *,
+        sample: bool = False,
+        max_new_tokens: int | None = None,
+    ) -> list[str]: ...
 
     def train_step(self, examples: list[tuple[str, str]]) -> float: ...
 
-    def sample_group(self, prompt: str, n: int) -> list[str]: ...
+    def sample_group(
+        self, prompt: str, n: int, max_new_tokens: int | None = None
+    ) -> list[str]: ...
 
     def policy_step(
         self,
@@ -97,7 +105,13 @@ class HFStudent:
             messages, tokenize=False, add_generation_prompt=True
         )
 
-    def generate(self, prompts: list[str], *, sample: bool = False) -> list[str]:
+    def generate(
+        self,
+        prompts: list[str],
+        *,
+        sample: bool = False,
+        max_new_tokens: int | None = None,
+    ) -> list[str]:
         torch, tok = self.torch, self.tokenizer
         self.model.eval()
         tok.padding_side = "left"
@@ -107,7 +121,10 @@ class HFStudent:
             padding=True,
             add_special_tokens=False,
         ).to(self.device)
-        kwargs = {"do_sample": sample, "max_new_tokens": self.max_new_tokens}
+        kwargs = {
+            "do_sample": sample,
+            "max_new_tokens": max_new_tokens or self.max_new_tokens,
+        }
         if sample:
             kwargs.update(temperature=self.temperature, top_p=0.95)
         with torch.no_grad():
@@ -152,8 +169,10 @@ class HFStudent:
         self._step(loss)
         return float(loss.detach().cpu())
 
-    def sample_group(self, prompt: str, n: int) -> list[str]:
-        return self.generate([prompt] * n, sample=True)
+    def sample_group(
+        self, prompt: str, n: int, max_new_tokens: int | None = None
+    ) -> list[str]:
+        return self.generate([prompt] * n, sample=True, max_new_tokens=max_new_tokens)
 
     def _completion_logps(self, input_ids, mask, labels):
         """Log-probs of completion tokens as [batch, tokens], zero elsewhere.
