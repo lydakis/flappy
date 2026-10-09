@@ -94,6 +94,15 @@ def test_transport_failure_closes_ledger_without_leaking_details(ledger):
         tutor.request("hi", "hint")
 
 
+def test_unexpected_model_closes_ledger_but_dated_snapshot_is_accepted(ledger):
+    tutor, _ = client(ledger, result=response(model=f"{DEFAULT_MODEL}-2026-09-30"))
+    assert tutor.request("hi", "hint")
+    tutor, _ = client(ledger, result=response(model="gpt-6-sol"))
+    with pytest.raises(BudgetStop, match="unexpected model"):
+        tutor.request("hi", "hint")
+    assert ledger.snapshot()["closed"]
+
+
 def test_incomplete_reply_is_billed_but_returns_none(ledger):
     tutor, _ = client(ledger, result=response(status="incomplete"))
     assert tutor.request("hi", "worked_example") is None

@@ -16,12 +16,13 @@ from pathlib import Path
 
 from llm.budgeted_teacher import BudgetedTeacher, BudgetStop, SharedBudget, _now
 
-# Verified 2026-10-08 against the developers.openai.com model pages.
+# Verified against the developers.openai.com model pages (gpt-6-luna on 2026-10-09).
 PRICES = {
+    "gpt-6-luna": ("0.10", "0.50", "none"),
     "gpt-5.4-mini-2026-03-17": ("0.75", "4.50", "none"),
     "gpt-5-mini-2025-08-07": ("0.25", "2.00", "minimal"),
 }
-DEFAULT_MODEL = "gpt-5.4-mini-2026-03-17"
+DEFAULT_MODEL = "gpt-6-luna"
 MAX_PROMPT_BYTES = 4000
 PURPOSES = {"hint", "worked_example", "explanation"}
 RUN_ID_RE = re.compile(r"[a-z0-9_.-]{1,64}")
@@ -239,7 +240,9 @@ class LedgerTutorClient(BudgetedTeacher):
                 "Tutor request failed; no retry; reservation kept"
             ) from None
         ledger.finish(attempt, usage)
-        if response.model != pricing["model"]:
+        if not re.fullmatch(
+            re.escape(pricing["model"]) + r"(-\d{4}-\d{2}-\d{2})?", str(response.model)
+        ):
             ledger.close()
             raise BudgetStop("Tutor response from unexpected model; ledger closed")
         if response.status == "incomplete":
