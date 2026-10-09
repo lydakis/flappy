@@ -10,3 +10,5 @@ pytest
 tenacity
 python-dotenv
 tensorboard
+transformers
+peft
