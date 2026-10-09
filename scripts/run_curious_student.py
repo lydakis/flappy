@@ -32,6 +32,7 @@ from llm.tutor_ledger import LedgerTutorClient, TutorLedger
 from student.agent import (
     ARMS,
     LEARNERS,
+    TUTOR_MODES,
     CuriousStudent,
     LoopConfig,
     evaluate,
@@ -47,6 +48,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--arm", choices=ARMS, default="progress")
     parser.add_argument("--learner", choices=LEARNERS, default="sft")
+    parser.add_argument(
+        "--tutor-mode",
+        choices=TUTOR_MODES,
+        default="retry",
+        help="retry: answer-free feedback then the student retries; "
+        "imitate: verified tutor answers become training targets",
+    )
     parser.add_argument("--group-size", type=int, default=4)
     parser.add_argument("--kl-coef", type=float, default=0.02)
     parser.add_argument(
@@ -133,7 +141,7 @@ def online_summary(events: list[dict]) -> dict:
 
 def main(argv: list[str] | None = None) -> dict:
     args = parse_args(argv)
-    run_id = f"{args.arm}-{args.learner}-s{args.seed}-{time.strftime('%Y%m%dt%H%M%S')}"
+    run_id = f"{args.arm}-{args.learner}-{args.tutor_mode}-s{args.seed}-{time.strftime('%Y%m%dt%H%M%S')}"
     deadline = time.monotonic() + args.max_minutes * 60
     log = RunLog(args.output / run_id, tensorboard=not args.no_tensorboard)
     tutor, spend, close_tutor = build_tutor(args, run_id)
@@ -159,6 +167,7 @@ def main(argv: list[str] | None = None) -> dict:
             group_size=args.group_size,
             kl_coef=args.kl_coef,
             lambda0=args.lambda0,
+            tutor_mode=args.tutor_mode,
         ),
         wallet=Wallet(args.start_credits),
         tutor=tutor,
@@ -179,6 +188,7 @@ def main(argv: list[str] | None = None) -> dict:
         "run_id": run_id,
         "arm": args.arm,
         "learner": args.learner,
+        "tutor_mode": args.tutor_mode,
         "eval_tasks": len(eval_tasks),
         "model": args.model,
         "device": model.device,

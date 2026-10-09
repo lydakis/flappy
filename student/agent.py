@@ -21,6 +21,7 @@ Learners (all update the same LoRA adapter):
 from __future__ import annotations
 
 import random
+import re
 from collections import Counter, defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -31,12 +32,15 @@ from student.curiosity import ProgressTracker
 from student.grpo import group_advantages
 from student.model import StudentModel
 from student.runlog import RunLog
-from student.tutor import Tutor
+from student.tutor import Tutor, parse_answer
 from world.board import PAY, Wallet, World
 from world.tasks import MAX_DIFFICULTY, MIN_DIFFICULTY, Grade, Task
 
 ARMS = ("no_tutor", "always_tutor", "progress")
 LEARNERS = ("sft", "grpo", "hybrid")
+# retry: answer-free feedback, the student retries and learns from its own passes.
+# imitate: verified tutor answers become training targets directly.
+TUTOR_MODES = ("retry", "imitate")
 
 
 class Example(NamedTuple):
@@ -44,7 +48,7 @@ class Example(NamedTuple):
 
     prompt: str
     completion: str
-    source: str  # self | tutor
+    source: str  # self | tutor | retry
     skill: str
 
 
@@ -64,12 +68,15 @@ class LoopConfig:
     group_size: int = 4
     kl_coef: float = 0.02
     lambda0: float = 1.0  # hybrid: replay SFT weight at zero success
+    tutor_mode: str = "retry"
 
     def __post_init__(self) -> None:
         if self.arm not in ARMS:
             raise ValueError(f"arm must be one of {ARMS}")
         if self.learner not in LEARNERS:
             raise ValueError(f"learner must be one of {LEARNERS}")
+        if self.tutor_mode not in TUTOR_MODES:
+            raise ValueError(f"tutor_mode must be one of {TUTOR_MODES}")
 
 
 class HelpValue:
@@ -218,9 +225,10 @@ class CuriousStudent:
                     }
                 )
                 if verified:
-                    self.buffer.append(
-                        Example(sibling.prompt, reply.answer, "tutor", task.skill)
-                    )
+                    if self.config.tutor_mode == "imitate":
+                        self.buffer.append(
+                            Example(sibling.prompt, reply.answer, "tutor", task.skill)
+                        )
                     attempt.prompt = (
                         f"Example task:\n{sibling.prompt}\nExample answer:\n{reply.answer}"
                         f"\n\nNow solve this task.\n{task.prompt}"
@@ -230,6 +238,9 @@ class CuriousStudent:
         return attempt
 
     def explain(self, attempt: Attempt, answer: str, feedback: str) -> None:
+        if self.config.tutor_mode == "retry":
+            self.retry_after_failure(attempt.task, answer, feedback)
+            return
         if not self.wants(
             "explanation", attempt.task, self.learning_value(attempt.task)
         ):
@@ -257,6 +268,97 @@ class CuriousStudent:
                 Example(attempt.task.prompt, reply.answer, "tutor", attempt.task.skill)
             )
         self.pending_explanation.add(attempt.task.skill)
+
+    def buy_feedback(
+        self, task: Task, answer: str, grader_feedback: str, trigger: str
+    ) -> str | None:
+        """Buy answer-free feedback. None if declined, failed or if it leaked a
+        passing answer (the feedback text itself passes the grader)."""
+        kind = "explanation"
+        value = self.learning_value(task)
+        if not self.wants(kind, task, value, stuck=trigger == "stuck"):
+            return None
+        if not self._buy(kind):
+            return None
+        reply = self._call(self.tutor.feedback, task, answer, grader_feedback)
+        text = reply.text.strip() if reply and reply.text else ""
+        leaked = bool(text) and self.leaks_answer(task, text)
+        self.log.event(
+            {
+                "type": "tutor",
+                "kind": kind,
+                "mode": "retry",
+                "trigger": trigger,
+                "tick": self.ticks,
+                "skill": task.skill,
+                "leaked": leaked,
+                "feedback": text[:400],
+            }
+        )
+        return None if leaked or not text else text
+
+    def leaks_answer(self, task: Task, text: str) -> bool:
+        """True if the feedback, an ANSWER: part, a line or a quoted fragment of it
+        passes the grader. A heuristic: paraphrased answers can still slip by."""
+        candidates = [text, parse_answer(text) or "", *text.splitlines()]
+        candidates += re.findall(r"""['"`]([^'"`]+)['"`]""", text)
+        return any(c.strip() and self.world.grade(task, c).passed for c in candidates)
+
+    @staticmethod
+    def retry_prompt(task: Task, answer: str, feedback: str) -> str:
+        return (
+            f"{task.prompt}\n\nYour previous answer:\n{answer.strip()[:600]}\n\n"
+            f"Tutor feedback: {feedback}\n\nTry again."
+        )
+
+    def _keep_retries(self, task, retries, grades, trigger) -> Example | None:
+        """Store passing retries against the bare prompt; return the first."""
+        passed = [a for a, g in zip(retries, grades) if g.passed]
+        self.help.update(task.skill, "explanation", bool(passed))
+        examples = [Example(task.prompt, a, "retry", task.skill) for a in passed]
+        self.buffer.extend(examples)
+        self.log.event(
+            {
+                "type": "retry",
+                "trigger": trigger,
+                "tick": self.ticks,
+                "skill": task.skill,
+                "attempts": len(retries),
+                "passed": len(passed),
+            }
+        )
+        return examples[0] if examples else None
+
+    def retry_after_failure(self, task: Task, answer: str, feedback: str) -> None:
+        text = self.buy_feedback(task, answer, feedback, "failure")
+        if text is None:
+            return
+        retry = self.model.generate(
+            [self.retry_prompt(task, answer, text)],
+            sample=True,
+            max_new_tokens=self.world.max_tokens(task.skill),
+        )[0]
+        self._keep_retries(task, [retry], [self.world.grade(task, retry)], "failure")
+
+    def retry_when_stuck(self, task: Task, answers: list[str], grades: list[Grade]):
+        """All samples failed: buy feedback and resample the group with it.
+
+        Returns the retry group for the GRPO term (None without reward variance)
+        and the first passing retry for replay.
+        """
+        text = self.buy_feedback(task, answers[0], grades[0].feedback, "stuck")
+        if text is None:
+            return None, None
+        prompt = self.retry_prompt(task, answers[0], text)
+        retries = self.model.sample_group(
+            prompt,
+            self.config.group_size,
+            max_new_tokens=self.world.max_tokens(task.skill),
+        )
+        retry_grades = [self.world.grade(task, a) for a in retries]
+        fresh = self._keep_retries(task, retries, retry_grades, "stuck")
+        advantages = group_advantages([g.score for g in retry_grades])
+        return ((prompt, retries, advantages) if advantages else None), fresh
 
     # -- loop ------------------------------------------------------------------
 
@@ -298,7 +400,13 @@ class CuriousStudent:
             max_new_tokens=self.world.max_tokens(task.skill),
         )
         grades = [self.world.grade(task, a) for a in answers]
-        result = self.settle(attempt, answers[0], grades[0])
+        # In retry mode a failing group is handled below, as a whole.
+        result = self.settle(
+            attempt,
+            answers[0],
+            grades[0],
+            allow_help=self.config.tutor_mode == "imitate",
+        )
         rewards = [g.score for g in grades]
         advantages = group_advantages(rewards)
         if advantages is not None:
@@ -313,7 +421,11 @@ class CuriousStudent:
             stats = self.model.policy_step(*group, self.config.kl_coef)
             self._log_step(task.skill, outcome, rewards, stats)
             return result
-        fresh = self.ask_when_stuck(task) if outcome == "all_fail" else None
+        fresh = None
+        if outcome == "all_fail" and self.config.tutor_mode == "retry":
+            group, fresh = self.retry_when_stuck(task, answers, grades)
+        elif outcome == "all_fail":
+            fresh = self.ask_when_stuck(task)
         replay = self.replay_batch(fresh)
         if group is None and not replay:
             return result
@@ -326,7 +438,7 @@ class CuriousStudent:
             rewards,
             stats,
             replay=len(replay),
-            tutor_injected=fresh is not None,
+            rescued=fresh is not None,
             lambdas={s: round(self.sft_weight(s), 3) for s in self.world.skills},
         )
         return result
@@ -391,7 +503,13 @@ class CuriousStudent:
             picks.append(self.rng.choice(by_skill[self.rng.choice(skills)]))
         return [(e.prompt, e.completion, self.sft_weight(e.skill)) for e in picks]
 
-    def settle(self, attempt: Attempt, answer: str, grade: Grade | None = None) -> dict:
+    def settle(
+        self,
+        attempt: Attempt,
+        answer: str,
+        grade: Grade | None = None,
+        allow_help: bool = True,
+    ) -> dict:
         task = attempt.task
         grade = grade or self.world.grade(task, answer)
         if task.skill in self.pending_explanation:
@@ -407,7 +525,7 @@ class CuriousStudent:
             if attempt.mode == "work":
                 earned = attempt.pay
                 self.wallet.earn(earned)
-        elif self.tutor is not None and self.config.learner != "grpo":
+        elif allow_help and self.tutor is not None and self.config.learner != "grpo":
             # Explanations only produce SFT data; GRPO learns from rewards alone.
             self.explain(attempt, answer, grade.feedback)
         event = {
@@ -452,12 +570,32 @@ class CuriousStudent:
         return sum(e.source == "tutor" for e in self.buffer)
 
     def learning_summary(self) -> dict:
-        """Per-skill group outcomes, stuck asks and current SFT weight."""
-        stuck = Counter(
-            (e["skill"], e["verified"])
-            for e in self.log.events
-            if e["type"] == "tutor" and e.get("trigger") == "stuck"
+        """Per-skill group outcomes, tutor asks, rescues, retries and SFT weight.
+
+        A stuck ask "rescues" the skill when it yields training data: a verified
+        tutor answer (imitate) or at least one passing retry (retry).
+        """
+        events = self.log.events
+        asks = Counter(
+            (e["skill"], e.get("trigger"))
+            for e in events
+            if e["type"] == "tutor" and e.get("trigger")
         )
+        leaked = Counter(e["skill"] for e in events if e.get("leaked"))
+        rescued = Counter(
+            e["skill"]
+            for e in events
+            if e.get("trigger") == "stuck"
+            and (
+                (e["type"] == "tutor" and e.get("verified"))
+                or (e["type"] == "retry" and e["passed"] > 0)
+            )
+        )
+        retries = defaultdict(lambda: [0, 0])
+        for e in events:
+            if e["type"] == "retry":
+                retries[e["skill"]][0] += e["attempts"]
+                retries[e["skill"]][1] += e["passed"]
         per_skill = {}
         for skill in self.world.skills:
             outcomes = self.group_outcomes[skill]
@@ -470,8 +608,12 @@ class CuriousStudent:
                     else None
                 ),
                 **{k: outcomes[k] for k in ("mixed", "all_fail", "all_pass")},
-                "stuck_asks": stuck[(skill, True)] + stuck[(skill, False)],
-                "tutor_injected": stuck[(skill, True)],
+                "stuck_asks": asks[(skill, "stuck")],
+                "failure_asks": asks[(skill, "failure")],
+                "rescued": rescued[skill],
+                "leaked_feedback": leaked[skill],
+                "retry_attempts": retries[skill][0],
+                "retry_passed": retries[skill][1],
                 "sft_weight": round(self.sft_weight(skill), 3),
             }
         parts = self.loss_parts["grpo"] + self.loss_parts["sft"]

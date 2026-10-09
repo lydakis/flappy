@@ -43,7 +43,10 @@ class FakeModel:
     def generate(self, prompts, *, sample=False, max_new_tokens=None):
         self.prompts += prompts
         smart = self.learn_after is not None and self.trained >= self.learn_after
-        return [re.findall(r"'(\w+)'", p)[-1] if smart else "?" for p in prompts]
+        return [
+            re.findall(r"'(\w+)'", p)[-1] if smart or "Tutor feedback:" in p else "?"
+            for p in prompts
+        ]
 
     def train_step(self, examples):
         self.trained += 1
@@ -53,8 +56,9 @@ class FakeModel:
 
     def sample_group(self, prompt, n, max_new_tokens=None):
         word = re.findall(r"'(\w+)'", prompt)[-1]
+        mode = "mixed" if "Tutor feedback:" in prompt else self.group_mode
         return {"mixed": ["?", word], "fail": ["?", "?"], "pass": [word, word]}[
-            self.group_mode
+            mode
         ] * (n // 2)
 
     def policy_step(self, prompt, completions, advantages, kl_coef):
@@ -69,9 +73,10 @@ class FakeModel:
 class SolvingBackend:
     """Scripted tutor that answers the last quoted word in the prompt."""
 
-    def __init__(self, fail_after=None):
+    def __init__(self, fail_after=None, leak=False):
         self.requests = []
         self.fail_after = fail_after
+        self.leak = leak
 
     def request(self, prompt, purpose):
         if self.fail_after is not None and len(self.requests) >= self.fail_after:
@@ -79,16 +84,25 @@ class SolvingBackend:
         self.requests.append(purpose)
         task_text = prompt.split("TASK:\n", 1)[1].split("\n\n", 1)[0]
         word = re.findall(r"'(\w+)'", task_text)[-1]
+        if "Do not state the final answer" in prompt and not self.leak:
+            return "Repeat the quoted word exactly, without punctuation."
         return f"Echo it.\nANSWER: {word}"
 
 
-def make(arm, backend=None, credits=100.0, model=None, learner="sft"):
+def make(
+    arm, backend=None, credits=100.0, model=None, learner="sft", tutor_mode="retry"
+):
     world = World([EchoFamily()], seed=1, board_size=3)
     student = CuriousStudent(
         world,
         model or FakeModel(),
         config=LoopConfig(
-            arm=arm, learner=learner, train_every=1, train_steps=1, min_buffer=1
+            arm=arm,
+            learner=learner,
+            tutor_mode=tutor_mode,
+            train_every=1,
+            train_steps=1,
+            min_buffer=1,
         ),
         wallet=Wallet(credits),
         tutor=Tutor(backend or SolvingBackend()),
@@ -109,7 +123,7 @@ def test_no_tutor_arm_never_calls_or_pays_the_tutor():
 def test_always_tutor_buys_help_and_only_verified_answers_become_training_data():
     backend = SolvingBackend()
     model = FakeModel(learn_after=2)
-    student = make("always_tutor", backend, model=model)
+    student = make("always_tutor", backend, model=model, tutor_mode="imitate")
     results = [r for _ in range(6) for r in student.tick()]
     assert {"hint", "worked_example", "explanation"} <= set(backend.requests)
     assert student.wallet.spent > 0
@@ -207,7 +221,9 @@ def test_hybrid_stuck_group_buys_verified_tutor_answer_for_replay():
     backend = SolvingBackend()
     model = FakeModel()
     model.group_mode = "fail"
-    student = make("always_tutor", backend, model=model, learner="hybrid")
+    student = make(
+        "always_tutor", backend, model=model, learner="hybrid", tutor_mode="imitate"
+    )
     student.tick()
     group, replay = model.hybrid_steps[-1]
     stuck = [e for e in student.log.events if e.get("trigger") == "stuck"]
@@ -217,7 +233,7 @@ def test_hybrid_stuck_group_buys_verified_tutor_answer_for_replay():
     skill = stuck[0]["skill"]
     assert completion in prompt and weight == pytest.approx(student.sft_weight(skill))
     summary = student.learning_summary()["per_skill"][skill]
-    assert summary["all_fail"] == 1 and summary["tutor_injected"] == 1
+    assert summary["all_fail"] == 1 and summary["rescued"] == 1
 
 
 def test_hybrid_without_tutor_or_data_takes_no_step():
@@ -247,4 +263,60 @@ def test_progress_arm_can_afford_to_rescue_a_stuck_skill():
     for _ in range(10):
         student.tick()
     stuck = [e for e in student.log.events if e.get("trigger") == "stuck"]
-    assert stuck and all(e["verified"] for e in stuck)
+    assert stuck and student.learning_summary()["per_skill"]["toy.echo"]["rescued"]
+
+
+def test_retry_mode_learns_from_own_retries_never_the_tutor_answer():
+    backend = SolvingBackend()
+    model = FakeModel()
+    student = make("always_tutor", backend, model=model)
+    for _ in range(3):
+        student.tick()
+    sources = {e.source for e in student.buffer}
+    assert "retry" in sources and "tutor" not in sources
+    # Retries are stored against the bare task prompt, without the feedback.
+    assert all("Tutor feedback" not in e.prompt for e in student.buffer)
+    retries = [e for e in student.log.events if e["type"] == "retry"]
+    assert retries and all(e["trigger"] == "failure" for e in retries)
+
+
+def test_retry_mode_stuck_group_resamples_with_feedback_for_grpo_and_replay():
+    model = FakeModel()
+    model.group_mode = "fail"
+    student = make("always_tutor", SolvingBackend(), model=model, learner="hybrid")
+    student.tick()
+    group, replay = model.hybrid_steps[-1]
+    prompt, _, advantages = group
+    assert "Tutor feedback:" in prompt and sum(advantages) == pytest.approx(0)
+    assert replay[0][0] == prompt.split("\n\nYour previous answer:")[0]
+    assert student.tutor_examples() == 0
+    summary = student.learning_summary()["per_skill"]
+    skill = next(s for s, v in summary.items() if v["stuck_asks"])
+    stuck = [e for e in student.log.events if e.get("trigger") == "stuck"]
+    assert summary[skill]["rescued"] == 1
+    assert [e["passed"] for e in stuck if e["type"] == "retry"] == [2]
+
+
+def test_feedback_that_leaks_a_passing_answer_is_discarded():
+    model = FakeModel()
+    model.group_mode = "fail"
+    student = make(
+        "always_tutor", SolvingBackend(leak=True), model=model, learner="hybrid"
+    )
+    student.tick()
+    assert [e for e in student.log.events if e.get("leaked")]
+    assert not [e for e in student.log.events if e["type"] == "retry"]
+    assert all("Tutor feedback" not in p for p in model.prompts)
+
+
+def test_leak_check_finds_answers_embedded_in_feedback_sentences():
+    from world.chat import ChatFamily
+
+    world = World([ChatFamily()], seed=0)
+    student = CuriousStudent(
+        world, FakeModel(), config=LoopConfig(), wallet=Wallet(10), seed=0
+    )
+    task = world.sample("chat.instruct", 2, random.Random(1))
+    reversed_word = task.hidden["value"]
+    assert student.leaks_answer(task, f"So the reversed word is '{reversed_word}'.")
+    assert not student.leaks_answer(task, "Read the letters from the last one.")

@@ -87,6 +87,18 @@ class Tutor:
         answer = parse_answer(text) if text else None
         return TutorReply("explanation", text, task, answer)
 
+    def feedback(self, task: Task, student_answer: str, feedback: str) -> TutorReply:
+        """Explanation priced like ``explanation`` that withholds the answer."""
+        text = self._ask(
+            "explanation",
+            "A student attempted the task below and failed. In at most three "
+            "sentences, explain what is wrong and how to fix it. Do not state the "
+            "final answer, the full solution or complete code.\n\n"
+            f"TASK:\n{task.prompt}\n\nSTUDENT ANSWER:\n{_ascii(student_answer)}\n\n"
+            f"GRADER FEEDBACK: {feedback}",
+        )
+        return TutorReply("explanation", text, task)
+
 
 class ScriptedTutorBackend:
     """Offline backend for tests and dry runs; returns canned text."""
