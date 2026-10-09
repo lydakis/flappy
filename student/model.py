@@ -66,7 +66,7 @@ class HFStudent:
         lora_rank: int = 16,
         lr: float = 1e-4,
         max_new_tokens: int = 256,
-        max_train_tokens: int = 768,
+        max_train_tokens: int = 1024,
         temperature: float = 0.7,
         seed: int = 0,
     ):
@@ -184,10 +184,14 @@ class HFStudent:
         hidden = base.model(input_ids=input_ids, attention_mask=mask).last_hidden_state
         targets = labels[:, 1:]
         keep = targets != -100
-        logits = base.lm_head(hidden[:, :-1][keep]).float()
-        picked = logits.gather(-1, targets[keep].unsqueeze(-1)).squeeze(-1)
+        # Integer indices, not a boolean mask: MPS re-evaluated the mask in the
+        # backward pass and crashed with an index shape mismatch.
+        rows, cols = keep.nonzero(as_tuple=True)
+        logits = base.lm_head(hidden[rows, cols]).float()
+        picked = logits.gather(-1, targets[rows, cols].unsqueeze(-1)).squeeze(-1)
         selected = picked - logits.logsumexp(dim=-1)
-        logp = selected.new_zeros(targets.shape).masked_scatter(keep, selected)
+        logp = hidden.new_zeros(targets.shape, dtype=selected.dtype)
+        logp = logp.index_put((rows, cols), selected)
         return logp, keep.float()
 
     def _grpo_term(self, prompt: str, completions: list[str], advantages, kl_coef):
