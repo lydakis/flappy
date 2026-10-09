@@ -66,7 +66,7 @@ class HFStudent:
         lora_rank: int = 16,
         lr: float = 1e-4,
         max_new_tokens: int = 256,
-        max_train_tokens: int = 1024,
+        max_train_tokens: int = 768,
         temperature: float = 0.7,
         seed: int = 0,
     ):
