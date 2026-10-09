@@ -152,6 +152,29 @@ How to read it:
 - Seed 0 agrees across hardware. SFT went 0.48 → 0.64 on the Mac and
   0.48 → 0.65 on an A10.
 
+**Tutor modes** (hybrid on an A100, 3 seeds, mean overall change):
+
+| Mode | Mean overall change |
+|---|---|
+| imitate | +0.12 |
+| retry | +0.11 |
+| retry_blank (no feedback) | +0.17 |
+
+- Feedback raised immediate retry success from about 1% to 6.5%, which is too
+  rare to matter.
+- At 0.5B the student gets little from in-context teaching, consistent with the
+  Self-Distillation Fine-Tuning caution about small models.
+- One imitate seed collapsed on code (0.75 → 0.28), the failure a promotion
+  gate should catch.
+
+**Learning-ahead positive control** (`scripts/run_lesson_control.py`):
+
+- The untrained student scores about 2% on the made-up language.
+- Lessons of 20-60 examples barely help.
+- 200-400 examples take one-operation programs to 73-100% and two-operation
+  programs to 33-47%.
+- Three- and four-operation programs stay at 13-27%.
+
 Full tables and the GPU runs are posted as comments on the pull request.
 
 ## Next step: learning ahead
