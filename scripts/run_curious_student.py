@@ -48,6 +48,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--learner", choices=LEARNERS, default="sft")
     parser.add_argument("--group-size", type=int, default=4)
     parser.add_argument("--kl-coef", type=float, default=0.02)
+    parser.add_argument(
+        "--lambda0", type=float, default=1.0, help="hybrid replay SFT weight"
+    )
     parser.add_argument("--ticks", type=int, default=20)
     parser.add_argument("--max-minutes", type=float, default=6.0)
     parser.add_argument("--seed", type=int, default=0)
@@ -138,6 +141,7 @@ def main(argv: list[str] | None = None) -> dict:
             train_steps=args.train_steps,
             group_size=args.group_size,
             kl_coef=args.kl_coef,
+            lambda0=args.lambda0,
         ),
         wallet=Wallet(args.start_credits),
         tutor=tutor,
@@ -186,8 +190,9 @@ def main(argv: list[str] | None = None) -> dict:
             "first_loss": student.losses[0] if student.losses else None,
             "last_loss": student.losses[-1] if student.losses else None,
             "buffer": len(student.buffer),
-            "tutor_examples": sum(src == "tutor" for *_, src in student.buffer),
+            "tutor_examples": student.tutor_examples(),
         },
+        "learning": student.learning_summary(),
     }
     (args.output / run_id / "summary.json").write_text(json.dumps(summary, indent=2))
     if args.save_adapter:

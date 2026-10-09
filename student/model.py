@@ -29,6 +29,13 @@ class StudentModel(Protocol):
         kl_coef: float,
     ) -> dict: ...
 
+    def hybrid_step(
+        self,
+        group: tuple[str, list[str], list[float]] | None,
+        replay: list[tuple[str, str, float]],
+        kl_coef: float,
+    ) -> dict: ...
+
 
 def pick_device(requested: str = "auto") -> str:
     import torch
@@ -164,6 +171,15 @@ class HFStudent:
         logp = selected.new_zeros(targets.shape).masked_scatter(keep, selected)
         return logp, keep.float()
 
+    def _grpo_term(self, prompt: str, completions: list[str], advantages, kl_coef):
+        torch = self.torch
+        input_ids, mask, labels = self._batch([(prompt, c) for c in completions])
+        logp, keep = self._completion_logps(input_ids, mask, labels)
+        with torch.no_grad(), self.model.disable_adapter():
+            ref_logp, _ = self._completion_logps(input_ids, mask, labels)
+        adv = torch.tensor(advantages, dtype=logp.dtype, device=logp.device)
+        return grpo_loss(logp, ref_logp, adv, keep, kl_coef)
+
     def policy_step(
         self,
         prompt: str,
@@ -172,16 +188,41 @@ class HFStudent:
         kl_coef: float,
     ) -> dict:
         """One GRPO step on a sampled group; the reference is the adapter-free base."""
-        torch = self.torch
         self.model.train()
-        input_ids, mask, labels = self._batch([(prompt, c) for c in completions])
-        logp, keep = self._completion_logps(input_ids, mask, labels)
-        with torch.no_grad(), self.model.disable_adapter():
-            ref_logp, _ = self._completion_logps(input_ids, mask, labels)
-        adv = torch.tensor(advantages, dtype=logp.dtype, device=logp.device)
-        loss, kl = grpo_loss(logp, ref_logp, adv, keep, kl_coef)
+        loss, kl = self._grpo_term(prompt, completions, advantages, kl_coef)
         self._step(loss)
         return {"loss": float(loss.detach().cpu()), "kl": float(kl.detach().cpu())}
+
+    def hybrid_step(
+        self,
+        group: tuple[str, list[str], list[float]] | None,
+        replay: list[tuple[str, str, float]],
+        kl_coef: float,
+    ) -> dict:
+        """One step on GRPO(group) + weighted SFT(replay); either part may be absent.
+
+        Replay loss is each example's token-mean NLL times its weight, averaged.
+        """
+        torch = self.torch
+        self.model.train()
+        grpo = kl = sft = torch.zeros((), device=self.device)
+        if group is not None:
+            grpo, kl = self._grpo_term(*group, kl_coef)
+        if replay:
+            batch = self._batch([(p, c) for p, c, _ in replay])
+            logp, keep = self._completion_logps(*batch)
+            nll = -logp.sum(dim=1) / keep.sum(dim=1).clamp(min=1)
+            weights = torch.tensor([w for *_, w in replay], device=nll.device)
+            sft = (weights * nll).mean()
+        loss = grpo + sft
+        if loss.requires_grad:
+            self._step(loss)
+        return {
+            "loss": float(loss.detach().cpu()),
+            "grpo": float(grpo.detach().cpu()),
+            "sft": float(sft.detach().cpu()),
+            "kl": float(kl.detach().cpu()),
+        }
 
     def save_adapter(self, path: Path) -> None:
         self.model.save_pretrained(str(path))

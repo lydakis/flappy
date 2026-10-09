@@ -38,6 +38,7 @@ class FakeModel:
         self.learn_after = learn_after
         self.prompts = []
         self.policy_steps = []
+        self.hybrid_steps = []
 
     def generate(self, prompts, *, sample=False):
         self.prompts += prompts
@@ -48,13 +49,21 @@ class FakeModel:
         self.trained += 1
         return 1.0 / self.trained
 
+    group_mode = "mixed"  # mixed | fail | pass
+
     def sample_group(self, prompt, n):
         word = re.findall(r"'(\w+)'", prompt)[-1]
-        return ["?", word] * (n // 2)
+        return {"mixed": ["?", word], "fail": ["?", "?"], "pass": [word, word]}[
+            self.group_mode
+        ] * (n // 2)
 
     def policy_step(self, prompt, completions, advantages, kl_coef):
         self.policy_steps.append((completions, advantages))
         return {"loss": 0.1, "kl": 0.0}
+
+    def hybrid_step(self, group, replay, kl_coef):
+        self.hybrid_steps.append((group, replay))
+        return {"loss": 0.2, "grpo": 0.1 if group else 0.0, "sft": 0.1, "kl": 0.0}
 
 
 class SolvingBackend:
@@ -104,8 +113,8 @@ def test_always_tutor_buys_help_and_only_verified_answers_become_training_data()
     results = [r for _ in range(6) for r in student.tick()]
     assert {"hint", "worked_example", "explanation"} <= set(backend.requests)
     assert student.wallet.spent > 0
-    assert any(src == "tutor" for *_, src in student.buffer)
-    assert all(completion != "?" for _, completion, _ in student.buffer)
+    assert student.tutor_examples() > 0
+    assert all(example.completion != "?" for example in student.buffer)
     # Once trained, paid work succeeds and earns credits.
     assert any(r["passed"] and r["mode"] == "work" and r["earned"] > 0 for r in results)
 
@@ -174,3 +183,56 @@ def test_grpo_learns_from_group_rewards_not_sft_or_explanations():
     # One tracker record per practice group, matching the SFT learner.
     practice = [e for e in student.log.events if e.get("mode") == "practice"]
     assert len(practice) == 4
+
+
+def test_hybrid_routes_by_group_outcome():
+    model = FakeModel()
+    student = make("progress", model=model, learner="hybrid")
+    model.group_mode = "mixed"
+    student.tick()
+    group, _ = model.hybrid_steps[-1]
+    assert group is not None and sum(group[2]) == pytest.approx(0)
+
+    # All samples pass: no GRPO term, no tutor request.
+    model.group_mode = "pass"
+    calls = sum(student.tutor_service.calls.values())
+    student.tick()
+    assert model.hybrid_steps[-1][0] is None
+    assert sum(student.tutor_service.calls.values()) == calls
+    summary = student.learning_summary()["per_skill"]
+    assert sum(s["mixed"] for s in summary.values()) == 1
+    assert sum(s["all_pass"] for s in summary.values()) == 1
+
+
+def test_hybrid_stuck_group_buys_verified_tutor_answer_for_replay():
+    backend = SolvingBackend()
+    model = FakeModel()
+    model.group_mode = "fail"
+    student = make("always_tutor", backend, model=model, learner="hybrid")
+    student.tick()
+    group, replay = model.hybrid_steps[-1]
+    stuck = [e for e in student.log.events if e.get("trigger") == "stuck"]
+    assert group is None and len(stuck) == 1 and stuck[0]["verified"]
+    # The fresh tutor answer leads the replay batch, weighted by the skill's lambda.
+    prompt, completion, weight = replay[0]
+    skill = stuck[0]["skill"]
+    assert completion in prompt and weight == pytest.approx(student.sft_weight(skill))
+    summary = student.learning_summary()["per_skill"][skill]
+    assert summary["all_fail"] == 1 and summary["tutor_injected"] == 1
+
+
+def test_hybrid_without_tutor_or_data_takes_no_step():
+    model = FakeModel()
+    model.group_mode = "fail"
+    student = make("no_tutor", model=model, learner="hybrid")
+    student.tick()
+    assert model.hybrid_steps == [] and model.trained == 0
+
+
+def test_replay_weight_decays_as_a_skill_improves():
+    student = make("no_tutor", learner="hybrid")
+    before = student.sft_weight("toy.echo")
+    for _ in range(10):
+        student.tracker.record("toy.echo", 1, True)
+    assert student.sft_weight("toy.echo") < before
+    assert student.sft_weight("toy.other") == pytest.approx(before)
