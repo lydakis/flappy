@@ -45,6 +45,19 @@ def test_plan_synthesiser_identity():
     assert proposals[0].root.to_dict() == leaf.to_dict()
 
 
+def test_selector_normalisation_for_comma_arguments():
+    plan = dsl.DSLNode(verb=dsl.DSLVerb.TYPE, args=["#field, hello"])
+    sketch = synth.Sketch(root=plan, holes=[])
+    context = {"selectors": ["#field"]}
+
+    proposals = list(synth.PlanSynthesiser().enumerate(sketch, context=context))
+    assert proposals, "Synthesiser should return the plan when selector matches"
+
+    verifier = verify.PlanVerifier()
+    result = verifier.verify(plan, trace=[], context=context)
+    assert result.ok, "Verifier should accept plans with normalised selectors"
+
+
 def test_verifier_stub():
     verifier = verify.PlanVerifier()
     result = verifier.verify(
