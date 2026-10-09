@@ -183,6 +183,7 @@ class CuriousStudent:
                         "tick": self.ticks,
                         "skill": task.skill,
                         "verified": verified,
+                        "answer": (reply.answer or "")[:400] if reply else None,
                     }
                 )
                 if verified:
@@ -213,6 +214,7 @@ class CuriousStudent:
                 "tick": self.ticks,
                 "skill": attempt.task.skill,
                 "verified": verified,
+                "answer": (reply.answer or "")[:400] if reply else None,
             }
         )
         if verified:
