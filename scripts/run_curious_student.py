@@ -65,6 +65,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--gpu-memory-fraction",
+        type=float,
+        default=None,
+        help="cap this run's share of CUDA memory when runs share a GPU",
+    )
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--train-every", type=int, default=2)
     parser.add_argument("--train-steps", type=int, default=2)
@@ -149,7 +155,13 @@ def main(argv: list[str] | None = None) -> dict:
     eval_tasks = evaluation_set(world, args.eval_per_cell, seed=10_000 + args.seed)
 
     started = time.monotonic()
-    model = HFStudent(args.model, device=args.device, lr=args.lr, seed=args.seed)
+    model = HFStudent(
+        args.model,
+        device=args.device,
+        lr=args.lr,
+        seed=args.seed,
+        gpu_memory_fraction=args.gpu_memory_fraction,
+    )
     load_sec = time.monotonic() - started
     started = time.monotonic()
     before = evaluate(world, model, eval_tasks)

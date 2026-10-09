@@ -69,6 +69,7 @@ class HFStudent:
         max_train_tokens: int = 768,
         temperature: float = 0.7,
         seed: int = 0,
+        gpu_memory_fraction: float | None = None,
     ):
         import torch
         from peft import LoraConfig, get_peft_model
@@ -77,6 +78,10 @@ class HFStudent:
         torch.manual_seed(seed)
         self.torch = torch
         self.device = pick_device(device)
+        if gpu_memory_fraction and self.device.startswith("cuda"):
+            # Concurrent runs share one GPU; cap each so allocator caches cannot
+            # crowd the others out (one run's cache reached 12 GB on an A10).
+            torch.cuda.set_per_process_memory_fraction(gpu_memory_fraction)
         self.tokenizer = AutoTokenizer.from_pretrained(model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
