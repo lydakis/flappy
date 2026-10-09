@@ -34,12 +34,14 @@ def _ascii(text: str, limit: int = MAX_ANSWER_CHARS) -> str:
 
 
 def parse_answer(text: str) -> str | None:
-    """Return the text after the last ``ANSWER:`` marker."""
+    """Return the text after the last ``ANSWER:`` marker, else the whole reply.
+
+    Tasks that say "reply with only ..." often make the tutor drop the marker.
+    Unmarked replies are safe to try because only graded-correct answers are used.
+    """
     marker = "ANSWER:"
-    if marker not in text:
-        return None
-    answer = text.rsplit(marker, 1)[1].strip()
-    return answer or None
+    answer = text.rsplit(marker, 1)[1] if marker in text else text
+    return answer.strip() or None
 
 
 class Tutor:

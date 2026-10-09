@@ -137,9 +137,11 @@ def test_evaluation_is_fixed_and_learning_free():
     assert evaluate(world, model, tasks)["toy.echo"] == 1.0 and model.trained == 0
 
 
-def test_parse_answer_takes_last_marker():
+def test_parse_answer_takes_last_marker_or_the_bare_reply():
     assert parse_answer("ANSWER: 1\nthen ANSWER: 2") == "2"
-    assert parse_answer("no marker") is None
+    # Regression: the tutor follows "reply with only the actions" and omits the marker.
+    assert parse_answer("click(13)\n") == "click(13)"
+    assert parse_answer("ANSWER:  ") is None
 
 
 @pytest.mark.parametrize("kwargs", [{"arm": "bogus"}, {"learner": "ppo"}])
