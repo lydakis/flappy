@@ -30,6 +30,7 @@ from llm.tutor_ledger import DEFAULT_MODEL as TUTOR_MODEL
 from llm.tutor_ledger import LedgerTutorClient, TutorLedger
 from student.agent import (
     ARMS,
+    LEARNERS,
     CuriousStudent,
     LoopConfig,
     evaluate,
@@ -44,6 +45,9 @@ from world.board import Wallet, World
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--arm", choices=ARMS, default="progress")
+    parser.add_argument("--learner", choices=LEARNERS, default="sft")
+    parser.add_argument("--group-size", type=int, default=4)
+    parser.add_argument("--kl-coef", type=float, default=0.02)
     parser.add_argument("--ticks", type=int, default=20)
     parser.add_argument("--max-minutes", type=float, default=6.0)
     parser.add_argument("--seed", type=int, default=0)
@@ -109,7 +113,7 @@ def online_summary(events: list[dict]) -> dict:
 
 def main(argv: list[str] | None = None) -> dict:
     args = parse_args(argv)
-    run_id = f"{args.arm}-s{args.seed}-{time.strftime('%Y%m%dt%H%M%S')}"
+    run_id = f"{args.arm}-{args.learner}-s{args.seed}-{time.strftime('%Y%m%dt%H%M%S')}"
     deadline = time.monotonic() + args.max_minutes * 60
     log = RunLog(args.output / run_id, tensorboard=not args.no_tensorboard)
     tutor, spend, close_tutor = build_tutor(args, run_id)
@@ -128,7 +132,12 @@ def main(argv: list[str] | None = None) -> dict:
         world,
         model,
         config=LoopConfig(
-            arm=args.arm, train_every=args.train_every, train_steps=args.train_steps
+            arm=args.arm,
+            learner=args.learner,
+            train_every=args.train_every,
+            train_steps=args.train_steps,
+            group_size=args.group_size,
+            kl_coef=args.kl_coef,
         ),
         wallet=Wallet(args.start_credits),
         tutor=tutor,
@@ -148,6 +157,8 @@ def main(argv: list[str] | None = None) -> dict:
     summary = {
         "run_id": run_id,
         "arm": args.arm,
+        "learner": args.learner,
+        "eval_tasks": len(eval_tasks),
         "model": args.model,
         "device": model.device,
         "tutor": None if tutor is None else args.tutor,

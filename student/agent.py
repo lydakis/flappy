@@ -18,18 +18,21 @@ from dataclasses import dataclass, field
 
 from llm.budgeted_teacher import BudgetStop
 from student.curiosity import ProgressTracker
+from student.grpo import group_advantages
 from student.model import StudentModel
 from student.runlog import RunLog
 from student.tutor import Tutor
 from world.board import Wallet, World
-from world.tasks import MAX_DIFFICULTY, MIN_DIFFICULTY, Task
+from world.tasks import MAX_DIFFICULTY, MIN_DIFFICULTY, Grade, Task
 
 ARMS = ("no_tutor", "always_tutor", "progress")
+LEARNERS = ("sft", "grpo")
 
 
 @dataclass
 class LoopConfig:
     arm: str = "progress"
+    learner: str = "sft"  # sft: fine-tune on passing answers; grpo: grader rewards
     practice_value: float = 2.0  # credits a practice success is worth to the student
     plateau_eps: float = 0.1
     train_every: int = 2
@@ -37,10 +40,14 @@ class LoopConfig:
     batch_size: int = 4
     buffer_size: int = 512
     min_buffer: int = 4
+    group_size: int = 4
+    kl_coef: float = 0.02
 
     def __post_init__(self) -> None:
         if self.arm not in ARMS:
             raise ValueError(f"arm must be one of {ARMS}")
+        if self.learner not in LEARNERS:
+            raise ValueError(f"learner must be one of {LEARNERS}")
 
 
 class HelpValue:
@@ -220,13 +227,16 @@ class CuriousStudent:
         if job is not None:
             attempts.append(self.prepare("work", job.task, job.pay))
         attempts.append(self.prepare("practice", self.choose_practice(), 0.0))
-        answers = []
+        results = []
         for attempt in attempts:
+            if attempt.mode == "practice" and self.config.learner == "grpo":
+                results.append(self.practice_grpo(attempt))
+                continue
             # Paid work is greedy; practice samples to explore new answers.
-            answers += self.model.generate(
+            answer = self.model.generate(
                 [attempt.prompt], sample=attempt.mode == "practice"
-            )
-        results = [self.settle(a, ans) for a, ans in zip(attempts, answers)]
+            )[0]
+            results.append(self.settle(attempt, answer))
         self.ticks += 1
         if self.ticks % self.config.train_every == 0:
             self.train()
@@ -234,9 +244,37 @@ class CuriousStudent:
         self.log_scalars()
         return results
 
-    def settle(self, attempt: Attempt, answer: str) -> dict:
+    def practice_grpo(self, attempt: Attempt) -> dict:
+        """Sample a group, reward each answer by its grade and take one GRPO step.
+
+        Bookkeeping (tracker, help value) uses the first sample only, so practice
+        statistics match the single-sample SFT learner.
+        """
+        answers = self.model.sample_group(attempt.prompt, self.config.group_size)
+        grades = [self.world.grade(attempt.task, a) for a in answers]
+        result = self.settle(attempt, answers[0], grades[0])
+        rewards = [g.score for g in grades]
+        advantages = group_advantages(rewards)
+        if advantages is not None:
+            stats = self.model.policy_step(
+                attempt.prompt, answers, advantages, self.config.kl_coef
+            )
+            self.losses.append(stats["loss"])
+            self.log.event(
+                {
+                    "type": "train",
+                    "learner": "grpo",
+                    "tick": self.ticks,
+                    "skill": attempt.task.skill,
+                    "reward_mean": sum(rewards) / len(rewards),
+                    **stats,
+                }
+            )
+        return result
+
+    def settle(self, attempt: Attempt, answer: str, grade: Grade | None = None) -> dict:
         task = attempt.task
-        grade = self.world.grade(task, answer)
+        grade = grade or self.world.grade(task, answer)
         if task.skill in self.pending_explanation:
             self.pending_explanation.discard(task.skill)
             self.help.update(task.skill, "explanation", grade.passed)
@@ -250,7 +288,8 @@ class CuriousStudent:
             if attempt.mode == "work":
                 earned = attempt.pay
                 self.wallet.earn(earned)
-        elif self.tutor is not None:
+        elif self.tutor is not None and self.config.learner == "sft":
+            # Explanations only produce SFT data; GRPO learns from rewards alone.
             self.explain(attempt, answer, grade.feedback)
         event = {
             "type": "attempt",
@@ -268,7 +307,7 @@ class CuriousStudent:
         return event
 
     def train(self) -> None:
-        if len(self.buffer) < self.config.min_buffer:
+        if self.config.learner != "sft" or len(self.buffer) < self.config.min_buffer:
             return
         recent = list(self.buffer)[-32:]
         for _ in range(self.config.train_steps):
@@ -282,6 +321,7 @@ class CuriousStudent:
         self.log.event(
             {
                 "type": "train",
+                "learner": "sft",
                 "tick": self.ticks,
                 "loss": self.losses[-1],
                 "buffer": len(self.buffer),

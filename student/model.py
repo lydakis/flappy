@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
+from student.grpo import grpo_loss
+
 DEFAULT_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
 SYSTEM_PROMPT = (
     "You are a careful assistant. Follow the requested output format exactly "
@@ -16,6 +18,16 @@ class StudentModel(Protocol):
     def generate(self, prompts: list[str], *, sample: bool = False) -> list[str]: ...
 
     def train_step(self, examples: list[tuple[str, str]]) -> float: ...
+
+    def sample_group(self, prompt: str, n: int) -> list[str]: ...
+
+    def policy_step(
+        self,
+        prompt: str,
+        completions: list[str],
+        advantages: list[float],
+        kl_coef: float,
+    ) -> dict: ...
 
 
 def pick_device(requested: str = "auto") -> str:
@@ -96,10 +108,9 @@ class HFStudent:
         width = batch["input_ids"].shape[1]
         return [tok.decode(row[width:], skip_special_tokens=True) for row in out]
 
-    def train_step(self, examples: list[tuple[str, str]]) -> float:
-        """One optimizer step on prompt/completion pairs; loss on completions only."""
+    def _batch(self, examples: list[tuple[str, str]]):
+        """Right-padded ids, attention mask and completion-only labels."""
         torch, tok = self.torch, self.tokenizer
-        self.model.train()
         rows = []
         for prompt, completion in examples:
             head = tok(self._chat(prompt), add_special_tokens=False)["input_ids"]
@@ -116,18 +127,61 @@ class HFStudent:
         mask = torch.tensor(
             [[1] * len(ids) + [0] * (width - len(ids)) for ids, _ in rows]
         )
-        loss = self.model(
-            input_ids=input_ids.to(self.device),
-            attention_mask=mask.to(self.device),
-            labels=labels.to(self.device),
-        ).loss
+        return input_ids.to(self.device), mask.to(self.device), labels.to(self.device)
+
+    def _step(self, loss) -> None:
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(
+        self.torch.nn.utils.clip_grad_norm_(
             [p for p in self.model.parameters() if p.requires_grad], 1.0
         )
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
+
+    def train_step(self, examples: list[tuple[str, str]]) -> float:
+        """One SFT step on prompt/completion pairs; loss on completions only."""
+        self.model.train()
+        logp, keep = self._completion_logps(*self._batch(examples))
+        loss = -logp.sum() / keep.sum()
+        self._step(loss)
         return float(loss.detach().cpu())
+
+    def sample_group(self, prompt: str, n: int) -> list[str]:
+        return self.generate([prompt] * n, sample=True)
+
+    def _completion_logps(self, input_ids, mask, labels):
+        """Log-probs of completion tokens as [batch, tokens], zero elsewhere.
+
+        Only completion positions go through the LM head: full-vocabulary logits
+        over whole prompts pushed a 16 GB machine into swap.
+        """
+        base = self.model.get_base_model()
+        hidden = base.model(input_ids=input_ids, attention_mask=mask).last_hidden_state
+        targets = labels[:, 1:]
+        keep = targets != -100
+        logits = base.lm_head(hidden[:, :-1][keep]).float()
+        picked = logits.gather(-1, targets[keep].unsqueeze(-1)).squeeze(-1)
+        selected = picked - logits.logsumexp(dim=-1)
+        logp = selected.new_zeros(targets.shape).masked_scatter(keep, selected)
+        return logp, keep.float()
+
+    def policy_step(
+        self,
+        prompt: str,
+        completions: list[str],
+        advantages: list[float],
+        kl_coef: float,
+    ) -> dict:
+        """One GRPO step on a sampled group; the reference is the adapter-free base."""
+        torch = self.torch
+        self.model.train()
+        input_ids, mask, labels = self._batch([(prompt, c) for c in completions])
+        logp, keep = self._completion_logps(input_ids, mask, labels)
+        with torch.no_grad(), self.model.disable_adapter():
+            ref_logp, _ = self._completion_logps(input_ids, mask, labels)
+        adv = torch.tensor(advantages, dtype=logp.dtype, device=logp.device)
+        loss, kl = grpo_loss(logp, ref_logp, adv, keep, kl_coef)
+        self._step(loss)
+        return {"loss": float(loss.detach().cpu()), "kl": float(kl.detach().cpu())}
 
     def save_adapter(self, path: Path) -> None:
         self.model.save_pretrained(str(path))

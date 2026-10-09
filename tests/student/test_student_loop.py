@@ -37,6 +37,7 @@ class FakeModel:
         self.trained = 0
         self.learn_after = learn_after
         self.prompts = []
+        self.policy_steps = []
 
     def generate(self, prompts, *, sample=False):
         self.prompts += prompts
@@ -46,6 +47,14 @@ class FakeModel:
     def train_step(self, examples):
         self.trained += 1
         return 1.0 / self.trained
+
+    def sample_group(self, prompt, n):
+        word = re.findall(r"'(\w+)'", prompt)[-1]
+        return ["?", word] * (n // 2)
+
+    def policy_step(self, prompt, completions, advantages, kl_coef):
+        self.policy_steps.append((completions, advantages))
+        return {"loss": 0.1, "kl": 0.0}
 
 
 class SolvingBackend:
@@ -64,12 +73,14 @@ class SolvingBackend:
         return f"Echo it.\nANSWER: {word}"
 
 
-def make(arm, backend=None, credits=100.0, model=None):
+def make(arm, backend=None, credits=100.0, model=None, learner="sft"):
     world = World([EchoFamily()], seed=1, board_size=3)
     student = CuriousStudent(
         world,
         model or FakeModel(),
-        config=LoopConfig(arm=arm, train_every=1, train_steps=1, min_buffer=1),
+        config=LoopConfig(
+            arm=arm, learner=learner, train_every=1, train_steps=1, min_buffer=1
+        ),
         wallet=Wallet(credits),
         tutor=Tutor(backend or SolvingBackend()),
         seed=3,
@@ -131,10 +142,10 @@ def test_parse_answer_takes_last_marker():
     assert parse_answer("no marker") is None
 
 
-@pytest.mark.parametrize("arm", ["bogus"])
-def test_unknown_arm_is_rejected(arm):
+@pytest.mark.parametrize("kwargs", [{"arm": "bogus"}, {"learner": "ppo"}])
+def test_unknown_arm_or_learner_is_rejected(kwargs):
     with pytest.raises(ValueError):
-        LoopConfig(arm=arm)
+        LoopConfig(**kwargs)
 
 
 def test_tutor_never_sees_hidden_grader_data():
@@ -144,3 +155,20 @@ def test_tutor_never_sees_hidden_grader_data():
     task = family.sample("toy.echo", 1, random.Random(0))
     student.tutor.explanation(task, "?", "wrong")
     assert "hidden" not in str(backend.requests)
+
+
+def test_grpo_learns_from_group_rewards_not_sft_or_explanations():
+    backend = SolvingBackend()
+    model = FakeModel()
+    student = make("always_tutor", backend, model=model, learner="grpo")
+    for _ in range(4):
+        student.tick()
+    assert model.trained == 0 and "explanation" not in backend.requests
+    assert len(model.policy_steps) == 4
+    completions, advantages = model.policy_steps[0]
+    assert sum(advantages) == pytest.approx(0)
+    for completion, advantage in zip(completions, advantages):
+        assert (advantage > 0) == (completion != "?")
+    # One tracker record per practice group, matching the SFT learner.
+    practice = [e for e in student.log.events if e.get("mode") == "practice"]
+    assert len(practice) == 4
