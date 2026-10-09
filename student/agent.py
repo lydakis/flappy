@@ -40,7 +40,11 @@ ARMS = ("no_tutor", "always_tutor", "progress")
 LEARNERS = ("sft", "grpo", "hybrid")
 # retry: answer-free feedback, the student retries and learns from its own passes.
 # imitate: verified tutor answers become training targets directly.
-TUTOR_MODES = ("retry", "imitate")
+# retry_blank: control for retry; same retry decisions and attempt counts, but the
+# retry prompt only says the answer was wrong (no tutor call, no cost).
+TUTOR_MODES = ("retry", "imitate", "retry_blank")
+RETRY_MODES = ("retry", "retry_blank")
+BLANK_FEEDBACK = "That answer was wrong."
 
 
 class Example(NamedTuple):
@@ -238,7 +242,7 @@ class CuriousStudent:
         return attempt
 
     def explain(self, attempt: Attempt, answer: str, feedback: str) -> None:
-        if self.config.tutor_mode == "retry":
+        if self.config.tutor_mode in RETRY_MODES:
             self.retry_after_failure(attempt.task, answer, feedback)
             return
         if not self.wants(
@@ -278,6 +282,18 @@ class CuriousStudent:
         value = self.learning_value(task)
         if not self.wants(kind, task, value, stuck=trigger == "stuck"):
             return None
+        if self.config.tutor_mode == "retry_blank":
+            self.log.event(
+                {
+                    "type": "tutor",
+                    "kind": "blank",
+                    "mode": "retry_blank",
+                    "trigger": trigger,
+                    "tick": self.ticks,
+                    "skill": task.skill,
+                }
+            )
+            return BLANK_FEEDBACK
         if not self._buy(kind):
             return None
         reply = self._call(self.tutor.feedback, task, answer, grader_feedback)
@@ -306,9 +322,10 @@ class CuriousStudent:
 
     @staticmethod
     def retry_prompt(task: Task, answer: str, feedback: str) -> str:
+        note = feedback if feedback == BLANK_FEEDBACK else f"Tutor feedback: {feedback}"
         return (
             f"{task.prompt}\n\nYour previous answer:\n{answer.strip()[:600]}\n\n"
-            f"Tutor feedback: {feedback}\n\nTry again."
+            f"{note}\n\nTry again."
         )
 
     def _keep_retries(self, task, retries, grades, trigger) -> Example | None:
@@ -422,7 +439,7 @@ class CuriousStudent:
             self._log_step(task.skill, outcome, rewards, stats)
             return result
         fresh = None
-        if outcome == "all_fail" and self.config.tutor_mode == "retry":
+        if outcome == "all_fail" and self.config.tutor_mode in RETRY_MODES:
             group, fresh = self.retry_when_stuck(task, answers, grades)
         elif outcome == "all_fail":
             fresh = self.ask_when_stuck(task)

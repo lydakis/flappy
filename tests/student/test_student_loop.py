@@ -320,3 +320,19 @@ def test_leak_check_finds_answers_embedded_in_feedback_sentences():
     reversed_word = task.hidden["value"]
     assert student.leaks_answer(task, f"So the reversed word is '{reversed_word}'.")
     assert not student.leaks_answer(task, "Read the letters from the last one.")
+
+
+def test_retry_blank_control_retries_equally_without_feedback_or_cost():
+    model = FakeModel()
+    model.group_mode = "fail"
+    backend = SolvingBackend()
+    student = make(
+        "always_tutor", backend, model=model, learner="hybrid", tutor_mode="retry_blank"
+    )
+    student.tick()
+    assert "explanation" not in backend.requests
+    retries = [e for e in student.log.events if e["type"] == "retry"]
+    stuck = [e for e in retries if e["trigger"] == "stuck"]
+    assert len(stuck) == 1 and stuck[0]["attempts"] == 4
+    assert all("Tutor feedback" not in p for p in model.prompts)
+    assert any("That answer was wrong." in p for p in model.prompts)
