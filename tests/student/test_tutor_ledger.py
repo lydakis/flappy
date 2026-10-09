@@ -1,6 +1,7 @@
 """The tutor ledger reserves before sending, caps spend and fails closed. Offline."""
 
 import json
+import os
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -132,3 +133,39 @@ def test_tampered_or_mismatched_ledger_fails_closed(ledger, tmp_path):
         ledger.initialize()
     with pytest.raises(BudgetStop):
         TutorLedger(tmp_path / "missing.json").snapshot()
+
+
+def test_remote_allocations_share_the_local_ceiling(ledger, tmp_path):
+    headroom = ledger.allocate("lambda-a10-1", "1.00")
+    assert headroom == Decimal("4.00")
+    with pytest.raises(BudgetStop, match="exceed"):
+        ledger.allocate("lambda-a10-2", "4.50")
+    # A remote ledger enforces its own (allocated) ceiling.
+    remote = TutorLedger(tmp_path / "remote.json", ceiling_usd="0.01")
+    remote.initialize()
+    tutor, fake = client(remote, run_cap=1.0)
+    allowed = int(Decimal("0.01") / remote.per_attempt)
+    for _ in range(allowed):
+        tutor.request("hi", "hint")
+    with pytest.raises(BudgetStop, match="allowance"):
+        tutor.request("hi", "hint")
+    assert len(fake.calls) == allowed
+    state = json.loads(ledger.path.read_text())
+    state["allocations"][0]["usd"] = "-5"
+    ledger.path.write_text(json.dumps(state))
+    with pytest.raises(BudgetStop, match="corrupt"):
+        ledger.snapshot()
+
+
+def test_env_key_is_validated_and_removed_from_the_environment(monkeypatch):
+    from llm.budgeted_teacher import take_env_key
+
+    monkeypatch.setenv("OPENAI_API_KEY", SECRET)
+    assert take_env_key() == SECRET
+    assert "OPENAI_API_KEY" not in os.environ
+    with pytest.raises(BudgetStop, match="absent"):
+        take_env_key()
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-replace-with-your-key-123456789")
+    with pytest.raises(BudgetStop) as info:
+        take_env_key()
+    assert "replace" not in str(info.value)

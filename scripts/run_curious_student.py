@@ -26,6 +26,7 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from llm.budgeted_teacher import take_env_key
 from llm.tutor_ledger import DEFAULT_MODEL as TUTOR_MODEL
 from llm.tutor_ledger import LedgerTutorClient, TutorLedger
 from student.agent import (
@@ -70,6 +71,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--tutor-model", default=TUTOR_MODEL)
     parser.add_argument("--key-file", type=Path, default=ROOT / ".env.local")
     parser.add_argument(
+        "--key-env",
+        action="store_true",
+        help="take OPENAI_API_KEY from the job environment (errand --env-file) "
+        "instead of --key-file; the variable is removed after reading",
+    )
+    parser.add_argument(
+        "--ledger-ceiling",
+        default="5.00",
+        help="ledger ceiling in USD; a remote ledger uses its local allocation",
+    )
+    parser.add_argument(
         "--ledger", type=Path, default=ROOT / "logs/curious-student/tutor-ledger.json"
     )
     parser.add_argument(
@@ -90,15 +102,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def build_tutor(args, run_id: str):
     """Return (Tutor | None, spend callable | None, closer)."""
     if args.arm == "no_tutor":
+        if args.key_env:
+            os.environ.pop("OPENAI_API_KEY", None)
         return None, None, lambda: None
     if args.tutor == "scripted":
         return Tutor(ScriptedTutorBackend()), None, lambda: None
-    ledger = TutorLedger(args.ledger, args.tutor_model)
+    ledger = TutorLedger(args.ledger, args.tutor_model, args.ledger_ceiling)
     if not args.ledger.exists():
         if not args.init_ledger:
             raise SystemExit("Tutor ledger missing; pass --init-ledger to create it")
         ledger.initialize()
-    client = LedgerTutorClient.from_key_file(ledger, args.key_file)
+    if args.key_env:
+        client = LedgerTutorClient.from_key(ledger, take_env_key())
+    else:
+        client = LedgerTutorClient.from_key_file(ledger, args.key_file)
     client.bind_run(run_id, args.max_spend)
     return Tutor(client), (lambda: ledger.totals(run_id)), client.close
 

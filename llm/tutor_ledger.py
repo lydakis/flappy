@@ -4,10 +4,17 @@ Follows the ``SharedBudget``/``ContinualBudget`` pattern: every request reserves
 worst-case charge before sending, reservations are never refunded, an ambiguous
 outcome closes the ledger, and a missing or altered ledger never resets itself.
 The ledger caps cumulative reservations at $5 and each run at its own allowance.
+
+Remote runners get their own ledger with a smaller ceiling; that ceiling is first
+recorded as an allocation in the local ledger, so local attempts plus remote
+allocations never exceed the original $5:
+
+    python -m llm.tutor_ledger allocate --name lambda-a10-1 --usd 1.00
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -28,9 +35,11 @@ PURPOSES = {"hint", "worked_example", "explanation"}
 RUN_ID_RE = re.compile(r"[a-z0-9_.-]{1,64}")
 
 
-def pricing_for(model: str) -> dict:
+def pricing_for(model: str, ceiling_usd: str = "5.00") -> dict:
     if model not in PRICES:
         raise BudgetStop("Tutor model has no verified pricing")
+    if not Decimal(0) < Decimal(ceiling_usd) <= Decimal(5):
+        raise BudgetStop("Tutor ledger ceiling must be in (0, 5] USD")
     input_usd, output_usd, effort = PRICES[model]
     return {
         "model": model,
@@ -44,7 +53,7 @@ def pricing_for(model: str) -> dict:
         "max_input_tokens": MAX_PROMPT_BYTES + 96,
         "max_output_tokens": 768,
         "reservation_multiplier": "1.10",
-        "total_ceiling_usd": "5.00",
+        "total_ceiling_usd": str(Decimal(ceiling_usd).quantize(Decimal("0.01"))),
     }
 
 
@@ -60,12 +69,22 @@ def per_attempt(pricing: dict) -> Decimal:
 
 
 class TutorLedger(SharedBudget):
-    """Locked ledger with a $5 cumulative ceiling and per-run allowances."""
+    """Locked ledger with a cumulative ceiling (default $5) and per-run allowances."""
 
-    def __init__(self, path: Path, model: str = DEFAULT_MODEL):
+    def __init__(
+        self, path: Path, model: str = DEFAULT_MODEL, ceiling_usd: str = "5.00"
+    ):
         super().__init__(path)
-        self.pricing = pricing_for(model)
+        self.pricing = pricing_for(model, ceiling_usd)
         self.per_attempt = per_attempt(self.pricing)
+        self.ceiling = Decimal(self.pricing["total_ceiling_usd"])
+
+    def _committed(self, state: dict) -> Decimal:
+        """Attempt reservations plus allowances handed to remote ledgers."""
+        allocated = sum(
+            (Decimal(a["usd"]) for a in state.get("allocations", [])), Decimal(0)
+        )
+        return len(state["attempts"]) * self.per_attempt + allocated
 
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -95,13 +114,39 @@ class TutorLedger(SharedBudget):
                     or row["status"] not in {"reserved", "complete", "failed"}
                 ):
                     raise ValueError("invalid reservation")
-            if len(attempts) * self.per_attempt > Decimal(
-                self.pricing["total_ceiling_usd"]
-            ):
+            allocations = state.get("allocations", [])
+            if not isinstance(allocations, list):
+                raise TypeError("invalid allocations")
+            for index, row in enumerate(allocations):
+                usd = Decimal(row["usd"])
+                if (
+                    row["id"] != index
+                    or not RUN_ID_RE.fullmatch(row["name"])
+                    or not usd.is_finite()
+                    or usd <= 0
+                ):
+                    raise ValueError("invalid allocation")
+            if self._committed(state) > self.ceiling:
                 raise ValueError("ceiling exceeded")
             return state
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, ArithmeticError):
             raise BudgetStop("Tutor ledger missing, corrupt or incompatible") from None
+
+    def allocate(self, name: str, usd: str) -> Decimal:
+        """Permanently set aside ``usd`` for a remote ledger; returns headroom left."""
+        amount = Decimal(usd)
+        if not RUN_ID_RE.fullmatch(name) or not amount.is_finite() or amount <= 0:
+            raise BudgetStop("Invalid allocation")
+        with self._locked():
+            state = self._read()
+            if state["closed"] or self._committed(state) + amount > self.ceiling:
+                raise BudgetStop("Allocation would exceed the tutor ceiling")
+            allocations = state.setdefault("allocations", [])
+            allocations.append(
+                {"id": len(allocations), "name": name, "usd": str(amount), "at": _now()}
+            )
+            self._write(state)
+            return self.ceiling - self._committed(state)
 
     def reserve(self, run_id: str, purpose: str, run_cap_usd: Decimal) -> int:
         if not RUN_ID_RE.fullmatch(run_id) or purpose not in PURPOSES:
@@ -112,9 +157,10 @@ class TutorLedger(SharedBudget):
             if state["closed"] or any(a["status"] != "complete" for a in attempts):
                 raise BudgetStop("Tutor budget closed or unresolved attempt")
             run_count = sum(a["run_id"] == run_id for a in attempts)
-            if (len(attempts) + 1) * self.per_attempt > Decimal(
-                self.pricing["total_ceiling_usd"]
-            ) or (run_count + 1) * self.per_attempt > run_cap_usd:
+            if (
+                self._committed(state) + self.per_attempt > self.ceiling
+                or (run_count + 1) * self.per_attempt > run_cap_usd
+            ):
                 raise BudgetStop("Tutor total or per-run allowance reached")
             attempt_id = len(attempts)
             attempts.append(
@@ -257,3 +303,24 @@ class LedgerTutorClient(BudgetedTeacher):
             ledger.close()
             raise BudgetStop("Tutor response validation failed; ledger closed")
         return text
+
+
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description="Tutor ledger maintenance")
+    sub = parser.add_subparsers(dest="command", required=True)
+    allocate = sub.add_parser(
+        "allocate", help="set aside an allowance for a remote ledger"
+    )
+    allocate.add_argument("--name", required=True)
+    allocate.add_argument("--usd", required=True)
+    allocate.add_argument(
+        "--ledger", type=Path, default=Path("logs/curious-student/tutor-ledger.json")
+    )
+    allocate.add_argument("--model", default=DEFAULT_MODEL)
+    args = parser.parse_args(argv)
+    headroom = TutorLedger(args.ledger, args.model).allocate(args.name, args.usd)
+    print(f"allocated {args.usd} USD to {args.name}; headroom {headroom} USD")
+
+
+if __name__ == "__main__":
+    main()
