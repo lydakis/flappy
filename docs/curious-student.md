@@ -142,8 +142,9 @@ How to read it:
 
 - The training loop improves held-out performance. SFT is a simple, sound
   default for the next experiment.
-- These numbers don't establish a robust ranking. A one-point gap between SFT
-  and hybrid is noise.
+- These numbers don't establish a robust ranking. Comparisons should be paired
+  by seed and judged against variation across seeds, not a fixed cutoff. The
+  SFT vs hybrid gap is well within that variation.
 - Configurations that include GRPO showed code regressions. Blaming the GRPO
   term specifically would need a controlled ablation.
 - In DeepSeek-R1's setup, distillation beat RL for small models. That is a
@@ -153,7 +154,44 @@ How to read it:
 
 Full tables and the GPU runs are posted as comments on the pull request.
 
-## Next experiment: a deployment stream
+## Next step: learning ahead
+
+The decisive question is whether the student can learn when an educational
+expense pays off later. The current world can't test that: help either
+improves the next attempt or it doesn't.
+
+`world/conventions.py` adds a task family built on a made-up command language.
+Programs of nonsense-named operations (`zib`, `kor`, `mup`, ...) run over word
+lists, so a pretrained model cannot know them.
+
+1. **Positive control** (`scripts/run_lesson_control.py`): can the student
+   learn the convention from a lesson of worked examples under generous SFT?
+   The control also measures forgetting on the original skills.
+2. **The choice:**
+   - a priced prerequisite lesson that helps every later task in the family
+   - or an easy exercise on a familiar skill that gives small, immediate
+     progress
+
+   The future workload varies by run and is never revealed:
+   - in heavy runs, the family is a large share of later jobs and the lesson
+     pays
+   - in rare runs it hardly appears and the lesson is wasted
+3. **Fork test before any controller:** from the same checkpoint, compare three
+   actions under a fixed later workload and fixed learning rules:
+   - study the lesson
+   - buy task-specific help
+   - do nothing
+
+   Compare cumulative first-attempt performance, paired across seeds, for both
+   heavy and rare workloads. This establishes that the choice has measurable
+   value before asking whether a controller can find it.
+4. **Controller:** only then, test whether the policy learns from the workload
+   it has seen when buying the lesson is worthwhile.
+
+The optimizer stays SFT throughout. Learner variants (for example
+self-distillation) come after the policy comparison.
+
+## Later experiment: a deployment stream
 
 **First milestone:** under a shifting stream of verifiable work and fixed
 resource limits, show that self-selected learning actions improve cumulative
@@ -191,7 +229,10 @@ promotion gate, stream and resource limits, under two policies:
 **Outcomes:**
 
 - **Primary:** cumulative unaided performance on arriving jobs, measured on
-  each job before learning from it.
+  each job's first attempt before learning from it. This is valid evidence of
+  online performance even though those jobs later enter training. The untouched
+  audit set separately measures generalization and retention. Fork-test
+  development results stay out of the final audit.
 - **Secondary:**
   - how fast the student acquires C
   - retention when A returns
@@ -204,7 +245,8 @@ promotion gate, stream and resource limits, under two policies:
 **The promotion gate:**
 
 - An adapter update is kept only if it passes per-skill tolerances against
-  both the previous checkpoint and a fixed reference.
+  both the previous checkpoint and a fixed reference. Anchoring only to the
+  initial model would not protect newly acquired skills from gradual erosion.
 - Keep three sets separate:
   - learning feedback
   - promotion validation, which becomes adaptively reused
