@@ -160,6 +160,9 @@ class HFStudent:
 
     def _step(self, loss) -> None:
         loss.backward()
+        self._apply_gradients()
+
+    def _apply_gradients(self) -> None:
         self.torch.nn.utils.clip_grad_norm_(
             [p for p in self.model.parameters() if p.requires_grad], 1.0
         )
@@ -230,23 +233,33 @@ class HFStudent:
         """One step on GRPO(group) + weighted SFT(replay); either part may be absent.
 
         Replay loss is each example's token-mean NLL times its weight, averaged.
+        The two parts are backpropagated separately and their gradients summed
+        before one optimizer step: same update as backpropagating their sum, but
+        peak memory is the larger part rather than both graphs at once.
         """
         torch = self.torch
         self.model.train()
         grpo = kl = sft = torch.zeros((), device=self.device)
+        stepped = False
         if group is not None:
             grpo, kl = self._grpo_term(*group, kl_coef)
+            if grpo.requires_grad:
+                grpo.backward()
+                stepped = True
         if replay:
             batch = self._batch([(p, c) for p, c, _ in replay])
             logp, keep = self._completion_logps(*batch)
             nll = -logp.sum(dim=1) / keep.sum(dim=1).clamp(min=1)
             weights = torch.tensor([w for *_, w in replay], device=nll.device)
             sft = (weights * nll).mean()
-        loss = grpo + sft
-        if loss.requires_grad:
-            self._step(loss)
+            if sft.requires_grad:
+                sft.backward()
+                stepped = True
+        if stepped:
+            self._apply_gradients()
+        loss = grpo.detach() + sft.detach()
         return {
-            "loss": float(loss.detach().cpu()),
+            "loss": float(loss.cpu()),
             "grpo": float(grpo.detach().cpu()),
             "sft": float(sft.detach().cpu()),
             "kl": float(kl.detach().cpu()),
