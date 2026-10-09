@@ -169,3 +169,21 @@ def test_env_key_is_validated_and_removed_from_the_environment(monkeypatch):
     with pytest.raises(BudgetStop) as info:
         take_env_key()
     assert "replace" not in str(info.value)
+
+
+def test_ceiling_raises_are_explicit_recorded_and_bounded(ledger):
+    ledger.allocate("remote-a", "4.90")
+    with pytest.raises(BudgetStop, match="exceed"):
+        ledger.allocate("remote-b", "1.00")
+    assert ledger.raise_ceiling("20.00", "approved higher budget") == Decimal("15.10")
+    ledger.allocate("remote-b", "1.00")
+    state = ledger.snapshot()
+    assert state["ceiling_changes"][0]["from"] == "5.00"
+    for usd in ("25.00", "10.00"):  # above the hard cap, or a decrease
+        with pytest.raises(BudgetStop):
+            ledger.raise_ceiling(usd, "no")
+    # A silent edit of the ceiling (no matching change record) fails closed.
+    state["pricing"]["total_ceiling_usd"] = "19.00"
+    ledger.path.write_text(json.dumps(state))
+    with pytest.raises(BudgetStop, match="corrupt"):
+        ledger.snapshot()

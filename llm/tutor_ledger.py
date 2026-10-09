@@ -33,13 +33,17 @@ DEFAULT_MODEL = "gpt-6-luna"
 MAX_PROMPT_BYTES = 4000
 PURPOSES = {"hint", "worked_example", "explanation"}
 RUN_ID_RE = re.compile(r"[a-z0-9_.-]{1,64}")
+# Hard upper bound for any ledger ceiling; George approved budgets above the
+# original $5 on 2026-10-09. Raising a ledger's ceiling is an explicit, recorded
+# step (``raise-ceiling``), never a silent edit.
+MAX_CEILING_USD = Decimal("20.00")
 
 
 def pricing_for(model: str, ceiling_usd: str = "5.00") -> dict:
     if model not in PRICES:
         raise BudgetStop("Tutor model has no verified pricing")
-    if not Decimal(0) < Decimal(ceiling_usd) <= Decimal(5):
-        raise BudgetStop("Tutor ledger ceiling must be in (0, 5] USD")
+    if not Decimal(0) < Decimal(ceiling_usd) <= MAX_CEILING_USD:
+        raise BudgetStop("Tutor ledger ceiling must be in (0, 20] USD")
     input_usd, output_usd, effort = PRICES[model]
     return {
         "model": model,
@@ -69,7 +73,11 @@ def per_attempt(pricing: dict) -> Decimal:
 
 
 class TutorLedger(SharedBudget):
-    """Locked ledger with a cumulative ceiling (default $5) and per-run allowances."""
+    """Locked ledger with a cumulative ceiling and per-run allowances.
+
+    The ceiling starts at the value the ledger was initialized with and may only
+    be raised through ``raise_ceiling``, which records each change.
+    """
 
     def __init__(
         self, path: Path, model: str = DEFAULT_MODEL, ceiling_usd: str = "5.00"
@@ -77,7 +85,15 @@ class TutorLedger(SharedBudget):
         super().__init__(path)
         self.pricing = pricing_for(model, ceiling_usd)
         self.per_attempt = per_attempt(self.pricing)
-        self.ceiling = Decimal(self.pricing["total_ceiling_usd"])
+        self.initial_ceiling = Decimal(self.pricing["total_ceiling_usd"])
+
+    def _ceiling(self, state: dict) -> Decimal:
+        changes = state.get("ceiling_changes", [])
+        expected = Decimal(changes[-1]["to"]) if changes else self.initial_ceiling
+        ceiling = Decimal(state["pricing"]["total_ceiling_usd"])
+        if ceiling != expected or not Decimal(0) < ceiling <= MAX_CEILING_USD:
+            raise ValueError("ceiling does not match its recorded history")
+        return ceiling
 
     def _committed(self, state: dict) -> Decimal:
         """Attempt reservations plus allowances handed to remote ledgers."""
@@ -100,7 +116,11 @@ class TutorLedger(SharedBudget):
     def _read(self) -> dict:
         try:
             state = json.loads(self.path.read_text())
-            if state["pricing"] != self.pricing or type(state["closed"]) is not bool:
+            fixed = {k: v for k, v in self.pricing.items() if k != "total_ceiling_usd"}
+            stored = {
+                k: v for k, v in state["pricing"].items() if k != "total_ceiling_usd"
+            }
+            if stored != fixed or type(state["closed"]) is not bool:
                 raise ValueError("incompatible ledger")
             attempts = state["attempts"]
             if not isinstance(attempts, list):
@@ -126,7 +146,7 @@ class TutorLedger(SharedBudget):
                     or usd <= 0
                 ):
                     raise ValueError("invalid allocation")
-            if self._committed(state) > self.ceiling:
+            if self._committed(state) > self._ceiling(state):
                 raise ValueError("ceiling exceeded")
             return state
         except (OSError, ValueError, KeyError, TypeError, ArithmeticError):
@@ -139,14 +159,32 @@ class TutorLedger(SharedBudget):
             raise BudgetStop("Invalid allocation")
         with self._locked():
             state = self._read()
-            if state["closed"] or self._committed(state) + amount > self.ceiling:
+            ceiling = self._ceiling(state)
+            if state["closed"] or self._committed(state) + amount > ceiling:
                 raise BudgetStop("Allocation would exceed the tutor ceiling")
             allocations = state.setdefault("allocations", [])
             allocations.append(
                 {"id": len(allocations), "name": name, "usd": str(amount), "at": _now()}
             )
             self._write(state)
-            return self.ceiling - self._committed(state)
+            return ceiling - self._committed(state)
+
+    def raise_ceiling(self, usd: str, reason: str) -> Decimal:
+        """Raise the cumulative ceiling (never lower it); returns headroom left."""
+        new = Decimal(usd)
+        if not reason.strip() or not new.is_finite() or new > MAX_CEILING_USD:
+            raise BudgetStop("Ceiling raise needs a reason and at most 20 USD")
+        with self._locked():
+            state = self._read()
+            old = self._ceiling(state)
+            if new <= old:
+                raise BudgetStop("Ceiling can only be raised")
+            state.setdefault("ceiling_changes", []).append(
+                {"from": str(old), "to": str(new), "at": _now(), "reason": reason}
+            )
+            state["pricing"]["total_ceiling_usd"] = str(new)
+            self._write(state)
+            return new - self._committed(state)
 
     def reserve(self, run_id: str, purpose: str, run_cap_usd: Decimal) -> int:
         if not RUN_ID_RE.fullmatch(run_id) or purpose not in PURPOSES:
@@ -158,7 +196,7 @@ class TutorLedger(SharedBudget):
                 raise BudgetStop("Tutor budget closed or unresolved attempt")
             run_count = sum(a["run_id"] == run_id for a in attempts)
             if (
-                self._committed(state) + self.per_attempt > self.ceiling
+                self._committed(state) + self.per_attempt > self._ceiling(state)
                 or (run_count + 1) * self.per_attempt > run_cap_usd
             ):
                 raise BudgetStop("Tutor total or per-run allowance reached")
@@ -317,9 +355,21 @@ def main(argv: list[str] | None = None) -> None:
         "--ledger", type=Path, default=Path("logs/curious-student/tutor-ledger.json")
     )
     allocate.add_argument("--model", default=DEFAULT_MODEL)
+    raise_ = sub.add_parser("raise-ceiling", help="raise the cumulative ceiling")
+    raise_.add_argument("--usd", required=True)
+    raise_.add_argument("--reason", required=True)
+    raise_.add_argument(
+        "--ledger", type=Path, default=Path("logs/curious-student/tutor-ledger.json")
+    )
+    raise_.add_argument("--model", default=DEFAULT_MODEL)
     args = parser.parse_args(argv)
-    headroom = TutorLedger(args.ledger, args.model).allocate(args.name, args.usd)
-    print(f"allocated {args.usd} USD to {args.name}; headroom {headroom} USD")
+    ledger = TutorLedger(args.ledger, args.model)
+    if args.command == "allocate":
+        headroom = ledger.allocate(args.name, args.usd)
+        print(f"allocated {args.usd} USD to {args.name}; headroom {headroom} USD")
+    else:
+        headroom = ledger.raise_ceiling(args.usd, args.reason)
+        print(f"ceiling raised to {args.usd} USD; headroom {headroom} USD")
 
 
 if __name__ == "__main__":
